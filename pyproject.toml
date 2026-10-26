@@ -1,0 +1,26 @@
+[project]
+name = "fine-tuning"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Kristjan Kaasik", email = "155821871+ChrisKK04@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "accelerate>=1.15.0",
+    "bitsandbytes>=0.50.2",
+    "datasets>=5.1.0",
+    "dotenv>=0.9.9",
+    "peft>=0.21.2",
+    "torch>=2.14.1",
+    "transformers>=5.20.2",
+    "trl>=1.16.0",
+]
+
+[project.scripts]
+fine-tuning = "fine_tuning:main"
+
+[build-system]
+requires = ["uv_build>=0.12.19,<0.13.0"]
+build-backend = "uv_build"
