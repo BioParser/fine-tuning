@@ -11,19 +11,21 @@ from huggingface_hub import login
 # CONFIGS
 # ===================================================
 
-# HuggingFace repository name
+# HuggingFace write repository name
 HF_REPO_ID = "" # HUGGING FACE REPO NAME HERE
-# HuggingFace login
-login(token="") # HUGGING FACE WRITE TOKEN HERE
+# HuggingFace write token
+login(token = "") # HUGGING FACE WRITE TOKEN HERE
 # Model id
 MODEL_ID = "Qwen/Qwen3.5-0.8B"
+# Path to the Alpaca formatted dataset
+DATASET_PATH = "./data/test_data.jsonl"
 
 # ===================================================
 # TRAINING
 # ===================================================
 
 # 1. Load the Alpaca dataset from local JSONL
-DATASET = load_dataset("json", data_files="./training_data.jsonl", split="train")
+dataset = load_dataset("json", data_files=DATASET_PATH, split="train")
 
 # 2. Format the JSONL samples into a single string
 def formatting_func(example):
@@ -59,7 +61,7 @@ peft_config = LoraConfig(
 # 5. Initialize trainer
 trainer = SFTTrainer(
     model=MODEL_ID,
-    train_dataset=DATASET,
+    train_dataset=dataset,
     formatting_func=formatting_func,
     peft_config=peft_config,
     args=training_config,
