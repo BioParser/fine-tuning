@@ -45,6 +45,7 @@ training_config = SFTConfig(
     learning_rate=2e-4,
     logging_steps=10, # logger and metric interval
     save_strategy="no", # when to checkpoint the model, other options are "epoch" and "steps"
+    use_cpu=False # False = GPU training, True = CPU training
 )
 
 # 4. PEFT config
