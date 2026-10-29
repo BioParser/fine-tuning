@@ -2,7 +2,7 @@
 Add the jupyter lab dependencies, and run 
 ```
 uv add jupyter lab
-uv run jupyer lab
+uv run jupyter lab
 ```
 You will get a link similar to this that you can open in your browser:
 ```
