@@ -1,28 +1,62 @@
 [project]
 name = "fine-tuning"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "Fine-tune Qwen3.5 with Unsloth (LoRA) to turn parsed PDFs into ETS trait TSVs for BioParser"
 readme = "README.md"
 authors = [
     { name = "Kristjan Kaasik", email = "155821871+ChrisKK04@users.noreply.github.com" }
 ]
-requires-python = ">=3.13"
+# Tested on CPython 3.13 (the RTX 2060 run used 3.13.15). The stack below has no
+# verified 3.14 combination, so uv refuses other versions instead of guessing.
+requires-python = ">=3.13,<3.14"
 dependencies = [
-    "accelerate>=1.15.0",
-    "bitsandbytes>=0.50.2",
-    "datasets>=5.1.0",
-    "peft>=0.21.2",
-    "torch>=2.14.1",
-    "transformers>=5.20.2",
-    "trl>=1.16.0",
+    # GPU training stack, pinned to the combination that ran on the RTX 2060:
+    # Unsloth 2026.11.1, transformers 5.2.0, TRL 0.22.2, torch 2.14.1+cu130.
+    # unsloth 2026.11.1 requires transformers<=5.17.0, trl<=1.15.0, datasets<5,
+    # torch<2.15. The previous pins (transformers>=5.20.2, trl>=1.16.0,
+    # datasets>=5.1.0) could not be installed together with Unsloth, which is
+    # why the notebook pip-installed packages into the venv behind uv's back.
+    "unsloth==2026.11.1",
+    "unsloth-zoo==2026.11.1",
+    "torch==2.14.1",
+    "transformers==5.2.0",
+    "trl==0.22.2",
+    "datasets>=4.3,<5",
+    "peft>=0.18",
+    "accelerate>=1.10",
+    "bitsandbytes>=0.45.5", # optim="adamw_8bit"
+    "torchao>=0.16",
 ]
 
+[dependency-groups]
+dev = ["pytest>=8.3", "ruff>=0.12"]
+# "lab" (previously listed) is an unrelated benchmark-experiment framework on PyPI,
+# not JupyterLab.
+notebook = ["jupyterlab>=4.4", "ipykernel>=6.29", "ipywidgets>=8.1"]
+
 [project.scripts]
-fine-tuning = "fine_tuning:main"
+bioparser-build-dataset = "bioparser_ft.build_dataset:main"
+bioparser-train = "bioparser_ft.train:main"
+bioparser-predict = "bioparser_ft.infer:main"
+bioparser-evaluate = "bioparser_ft.evaluate:main"
 
 [build-system]
 requires = ["uv_build>=0.12.19,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.uv]
-package = false
+default-groups = ["dev", "notebook"]
+
+[tool.uv.build-backend]
+module-name = "bioparser_ft"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["E501", "RUF001", "RUF002", "RUF003"] # long lines in prompt text; Unicode in docs is intended
