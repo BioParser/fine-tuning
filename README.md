@@ -1,4 +1,232 @@
-Repository of the stuff needed to fine-tune a model for [BioParser](https://github.com/BioParser/BioParser).
+# fine-tuning
 
-## Packages
-The project uses the [uv](https://docs.astral.sh/uv/) package manager. Sync the packages with `uv sync`.
+This repository contains the tools to fine-tune the model `Qwen/Qwen3.5-0.8B` for
+[BioParser](https://github.com/BioParser/BioParser). The tools use Unsloth and LoRA.
+
+The model reads a scientific article that MinerU parsed from a PDF file. Then the model writes
+the trait data of the article as a TSV table in the client ETS format. The FastAPI service
+changes the TSV table to JSON with the function `bioparser_ft.postprocess.to_ets_records`.
+
+```
+PDF --MinerU--> markdown --clean_markdown--> chat prompt --Qwen3.5+LoRA--> TSV --to_ets_records--> JSON --> FastAPI
+             one training example = (parsed PDF, client ETS TSV)
+```
+
+## Installation
+
+1. Install [uv](https://docs.astral.sh/uv/).
+2. Go to the repository folder.
+3. Run this command:
+
+   ```bash
+   uv sync
+   ```
+
+The command `uv sync` installs the packages from `uv.lock`. It also installs the package
+`bioparser_ft` of this repository in editable mode.
+
+The file `uv.lock` contains the package versions that are tested to operate correctly on the RTX 2060 GPU
+with 6 GB of VRAM:
+
+- Unsloth 2026.11.1
+- transformers 5.2.0 and TRL 0.22.2
+- torch 2.14.1+cu130, Triton 3.8.0 and xformers 0.0.35
+- Python 3.13
+
+**CAUTION:** Do not use `pip install` in the `.venv` environment. Packages from pip are not in
+`uv.lock`. Then uv cannot make the same environment again.
+
+To add or change a package, do the steps that follow:
+
+1. Change `pyproject.toml`.
+2. Run `uv lock`.
+3. Run `uv sync`.
+
+**NOTE:** The command `unsloth install-kernels` is not necessary for Qwen3.5. Unsloth contains
+the Gated-DeltaNet Triton kernels. Kernel packages from other sources are not in `uv.lock`, and
+`uv sync` removes them. The command `uv sync --inexact` keeps them.
+
+## From client data to a trained model
+
+1. Put the client data in the folder `fine_tuning_data/`, as
+   [fine_tuning_data/README.md](fine_tuning_data/README.md) shows.
+2. Parse the PDF files with the MinerU version of production:
+
+   ```bash
+   scripts/parse_pdfs.sh
+   ```
+
+   The script writes one zip file for each PDF file to `fine_tuning_data/parsed/`.
+3. Make the dataset:
+
+   ```bash
+   uv run bioparser-build-dataset
+   ```
+
+   The command writes `train.jsonl`, `val.jsonl` and `test.jsonl` to `data/processed/`. It also
+   examines each pair of files and writes the results to `build_report.json`.
+4. Train the model with this command:
+
+   ```bash
+   uv run bioparser-train
+   ```
+
+   You can also use the notebook. Start JupyterLab with `uv run jupyter lab`. Then open
+   `notebooks/Qwen3_5_0_8B.ipynb`. The command and the notebook use the same functions in
+   `src/bioparser_ft/`. The tools save the adapter in `outputs/qwen3.5-0.8b-ets/lora_adapter/`.
+5. Use the adapter on the test articles:
+
+   ```bash
+   uv run bioparser-predict --model outputs/qwen3.5-0.8b-ets/lora_adapter --dataset data/processed/test.jsonl --out outputs/preds_test.jsonl
+   ```
+
+6. Calculate the scores:
+
+   ```bash
+   uv run bioparser-evaluate --dataset data/processed/test.jsonl --predictions outputs/preds_test.jsonl
+   ```
+
+   The command gives the precision, the recall and the F1 score for rows, cells and values.
+
+## Output format
+
+The file `src/bioparser_ft/schema.py` contains the output format. The training tools, the
+inference tools and the API all use this file.
+
+- **19 columns.** The model writes all ETS columns, but not the column `author`.
+- **Column `author`.** This column always contains `BioParser`. This is a client rule. The
+  function `to_ets_records` adds the value. The client labels contain the ORCID of the curator in
+  this column. For this reason, the training data does not contain the column `author`.
+- **Column `references`.** This column contains the Harvard citation from Google Scholar. The
+  client added this citation. It is not text from the PDF file. The model writes the citation
+  only on the first data row. The function `to_ets_records` copies it to the other rows.
+- **Correct citation from the API.** If the API has a correct citation, give it to
+  `to_ets_records` with the parameter `references=`.
+- **Shorter output.** A citation on each row adds approximately 60 tokens to each row. With only
+  one citation and without the column `author`, the output for the client data is approximately
+  59% shorter.
+- **Model TSV format.** Each line contains one record. The format has no quotation marks. A cell
+  never contains a TAB character or a line break.
+- **Client TSV files.** The client files are Excel exports. Some cells in these files have
+  quotation marks, TAB characters and line breaks. The function `tsv.read_ets_tsv` reads these
+  cells correctly. It joins the lines of a cell with ` | `, the list separator of Darwin Core.
+- **Fixed rules after the model.** The function `to_ets_records` also uses fixed rules, because
+  these rules are more accurate than a small model:
+  - If `taxonRank` is empty, the function finds the rank from the name. The rule comes from the
+    client. It gives the same result as the client labels for 99.98% of the records.
+  - The function changes `H. sapiens` to `Homo sapiens` when the other rows show the full genus
+    name.
+  - The function changes different forms of a value to one form, for example `males` to `Male`.
+
+### Changes to the output format
+
+If you change the columns, the prompt or the normalization, do the steps that follow:
+
+1. Increase the value of `PROMPT_VERSION` in `src/bioparser_ft/schema.py`.
+2. Make the dataset again.
+3. Train the model again.
+
+The tools stop with an error if the dataset has an old `PROMPT_VERSION`.
+
+## FastAPI integration
+
+The modules `schema`, `markdown`, `tsv` and `postprocess` use only the Python standard library.
+The FastAPI service can import these modules or keep a copy of them.
+
+```python
+import json
+import threading
+
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+from bioparser_ft.infer import generate_tsv, load_for_inference
+from bioparser_ft.postprocess import to_ets_records
+
+app = FastAPI()
+model, processor = load_for_inference("outputs/qwen3.5-0.8b-ets/lora_adapter")
+gpu = threading.Lock()  # One generation at a time on one GPU. For more throughput, use vLLM.
+
+
+class ParseRequest(BaseModel):
+    markdown: str  # MinerU output for one PDF file. Use the MinerU version of the training data.
+    references: str | None = None  # A correct Harvard citation, if the API has one
+
+
+@app.post("/parse")
+def parse(req: ParseRequest) -> dict:  # A sync function: FastAPI runs it in a worker thread.
+    with gpu:
+        gen = generate_tsv(model, processor, req.markdown, max_new_tokens=8192, max_seq_length=32768)
+    result = to_ets_records(gen.text, references=req.references, complete=gen.complete)
+    return json.loads(result.to_json())  # {"records": [...20 ETS columns...], "warnings": [...], "complete": bool}
+```
+
+For vLLM, export a merged 16-bit model with `bioparser-train --merge-16bit`. Then use one of the
+two methods that follow:
+
+- Send a prompt from `bioparser_ft.chat.render_prompt` to a raw completion endpoint.
+- Use the chat endpoint with `chat_template_kwargs={"enable_thinking": false}`.
+
+## GPU notes: RTX 2060 Max-Q with 6 GB
+> [!NOTE] 
+> RTX 2060 Max-Q with 6 GB is a very low-end turing GPU tested for minimal requirements.
+- **Data type.** Turing GPUs do not have bf16. On these GPUs, Unsloth trains Qwen3.5 in float32,
+  because the Gated-DeltaNet layers give NaN gradients in float16. Unsloth does not recommend
+  4-bit QLoRA for Qwen3.5.
+- **CPU RAM offload.** When the VRAM is too small, Unsloth moves data to the CPU RAM:
+  - `use_gradient_checkpointing="unsloth"` moves the checkpointed activations to the CPU RAM.
+  - `offload_embedding="auto"` moves the input embedding for the 248K-token vocabulary to the
+    CPU RAM.
+  - The function `train.load_model` sets the two options. It also gives `max_seq_length` to the
+    loader, because Unsloth calculates the offload from this value.
+- **Sequence length.** The default value of `max_seq_length` is 16,384 tokens. Typical examples
+  have approximately 6,000 to 15,000 tokens:
+  - System prompt: approximately 770 tokens
+  - Article: 4,000 to 12,000 tokens
+  - TSV table: 1,000 to 6,000 tokens
+
+  The tools remove examples that are longer than the limit. They never cut an example, because a
+  cut removes the answer. For 32,768 tokens, also use the option `--tiled-mlp`.
+- **LoRA modules.** The LoRA adapters are on these modules:
+  - `in_proj_qkv`, `in_proj_z` and `out_proj` in the 18 Gated-DeltaNet layers
+  - `q_proj`, `k_proj`, `v_proj` and `o_proj` in the 6 full-attention layers
+  - `gate_proj`, `up_proj` and `down_proj` in the MLP of all 24 layers
+
+## Data protection and security
+
+**CAUTION:** Do not commit client data to git. The client TSV files, the PDF files, the parsed
+text, the datasets and the model weights are confidential. Git does not add these files, because
+the file `.gitignore` contains them.
+
+**CAUTION:** Do not upload model weights to a public repository. Model weights from client data
+can show this data again. The option `--push-to-hub` uploads only to private repositories. If the
+repository is public, the option stops with an error.
+
+**CAUTION:** Do not use the MinerU option `--remote` with client PDF files. This option sends the
+PDF files to mineru.net. The script `scripts/parse_pdfs.sh` uses `--tier basic`, which operates
+only on your computer.
+
+- Keep the Hugging Face token in `$HF_TOKEN`, or use `hf auth login`. Do not write the token in
+  the code.
+- Parsed zip files can contain dangerous content. For this reason, the tools read only
+  `markdown.md`, in memory and with a size limit. The tools do not extract files to the disk.
+- Commit notebooks without outputs. The test `tests/test_notebook_clean.py` makes sure that the
+  notebooks have no outputs.
+
+## Tests
+
+1. To run the tests with the test data of the repository, use this command:
+
+   ```bash
+   uv run pytest
+   ```
+
+2. To also run the tests with the real client files, use this command:
+
+   ```bash
+   BIOPARSER_ETS_DIR=fine_tuning_data/ets_tsv uv run pytest tests/test_real_data.py -s
+   ```
+
+The tests with client files make sure that the tools read all 181 TSV files with 50,060 records.
+They also make sure that each record goes through the model TSV format without changes. They
+also compare the `taxonRank` rule with the client labels.
