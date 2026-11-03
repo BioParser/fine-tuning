@@ -218,3 +218,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# vim
+*.~
+*.un~
+
+# data
+/data/
+# outputs
+/outputs/
