@@ -53,15 +53,28 @@ LORA_TARGET_MODULES: tuple[str, ...] = (
 class TrainConfig:
     dataset_dir: Path = Path("data/processed")
     output_dir: Path = Path("outputs/qwen3.5-0.8b-ets")
+
+    # Model
     model_name: str = "Qwen/Qwen3.5-0.8B"
-    # A commit hash of the Hub repository. With None, each run loads the newest commit, and the
-    # weights, the tokenizer or the chat template can change.
-    model_revision: str | None = None
-    max_seq_length: int = 65536 # prompt + paper + TSV; longer examples are dropped, not cut
-    lora_r: int = 16
-    lora_alpha: int = 16
+    model_revision: str | None = None # pin of model
+    max_seq_length: int = 65536 # still need a bit longer to fit all PDFs
+                                # still few long PDFs are dropped if exceeds msl
+
+    # LoRA:   W' = W + (alpha/r) BA
+    #
+    # r, rank 16: trainable parameters 32,768
+    # r, rank 64: trainable parameters 131,072
+    #
+    # r = 16, alpha = 32 =>   32/16=2 stronger update
+    #
+    # r = 64, alpha = 64 =>   64/64=1 but larger adapter 
+    #
+    lora_r: int = 16 # lower rank -> less trainable parameters -> worse fine-tu
+    lora_alpha: int = 16 # how strongly the LoRA update affects the weights 
     lora_dropout: float = 0.0  # 0 enables Unsloth's fast LoRA kernels
     target_modules: tuple[str, ...] = LORA_TARGET_MODULES
+
+    # Training
     epochs: float = 3.0
     learning_rate: float = 2e-4
     batch_size: int = 1  # long sequences; use grad_accum for the effective batch
