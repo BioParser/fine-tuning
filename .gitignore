@@ -244,3 +244,4 @@ __marimo__/
 # git
 *.patch
 *.diff
+*.msg

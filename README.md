@@ -29,7 +29,8 @@ The file `uv.lock` contains the package versions that we tested on the RTX 2060 
 with 6 GB of VRAM:
 
 - Unsloth 2026.11.1
-- transformers 5.2.0 and TRL 0.22.2
+- transformers 5.17.0 and TRL 0.22.2. The RTX 2060 run used transformers 5.2.0. Version 5.17.0
+  fixes 4 security advisories. Test it on the GPU before you merge a change to the stack.
 - torch 2.14.1+cu130, Triton 3.8.0 and xformers 0.0.35
 - Python 3.13
 
@@ -292,6 +293,15 @@ only on your computer.
   the code.
 - Parsed zip files can contain dangerous content. For this reason, the tools read only
   `markdown.md`, in memory and with a size limit. The tools do not extract files to the disk.
+- Two Dependabot alerts have no fix that agrees with Unsloth 2026.11.1, the newest version.
+  Unsloth needs `datasets<5`, and `datasets` 4.8.5 needs `fsspec<=2026.2.0`. The code does not
+  use the vulnerable functions:
+  - `datasets` (GHSA-379c-qx7v-6h59): the folder-based dataset builders. The code uses only
+    `Dataset.from_list`.
+  - `fsspec` (GHSA-27vj-qcqg-25rc): the `ReferenceFileSystem` (URLs that start with
+    `reference://`). The code does not use fsspec directly.
+
+  When Unsloth accepts `datasets>=5.0.1`, update `datasets` and `fsspec`.
 - Commit notebooks without outputs. The test `tests/test_notebook_clean.py` makes sure that the
   notebooks have no outputs.
 - The Git hooks and CI stop a commit with client data, PDF files, model weights or tokens. For
