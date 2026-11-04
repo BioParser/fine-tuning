@@ -238,6 +238,12 @@ __marimo__/
 /unsloth_compiled_cache/
 *.safetensors
 *.gguf
+*.bin
+*.pt
+*.pth
+*.ckpt
+# datasets and predictions contain the client text, also outside /data/ and /outputs/
+*.jsonl
 # tool caches
 .ruff_cache/
 

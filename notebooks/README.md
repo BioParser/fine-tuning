@@ -1,8 +1,8 @@
 # Notebooks
 The `Qwen...original_tutorial.ipynb` was the original test notebook. It is kept
-as a reference, but note that the `pip install` commands in the notebook will
-install unneeded dependencies. Also the notebook does not follow the repo
-development. 
+as a reference. Its install cell is a Markdown cell, so that nobody runs it: the commands install
+packages that are not in `uv.lock`, and one of them has security advisories. Also the notebook
+does not follow the repo development.
 
 The test data of the tutorial is client data: 3 parsed articles and their TSV labels. For this
 reason, it is not in git. The notebook loads it from `fine_tuning_data/tutorial_test_data.json`.

@@ -50,7 +50,7 @@ repos:
             | outputs/.*
             | lora_model/.*
             | unsloth_compiled_cache/.*
-            | .*\.(pdf|safetensors|gguf|pt|pth|ckpt)
+            | .*\.(pdf|safetensors|gguf|pt|pth|ckpt|bin|jsonl)
           )$
 
       - id: no-secrets

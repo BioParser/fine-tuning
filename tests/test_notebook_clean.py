@@ -15,8 +15,6 @@ NOTEBOOKS = sorted((Path(__file__).parents[1] / "notebooks").glob("*.ipynb"))
 # The longest cell of Qwen3_5_0_8B.ipynb has approximately 1,000 characters. A parsed article has
 # 20,000 characters or more.
 MAX_CELL_CHARS = 10_000
-# The original Unsloth tutorial is a reference. It keeps its install cell (refer to notebooks/README.md).
-REFERENCE_NOTEBOOKS = {"Qwen3_5_0_8B_original_tutorial.ipynb"}
 
 
 @pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda p: p.name)
@@ -27,9 +25,7 @@ def test_notebook_has_no_outputs(path: Path) -> None:
     assert "widgets" not in nb.get("metadata", {}), f"{path.name}: widget state in metadata"
 
 
-@pytest.mark.parametrize(
-    "path", [p for p in NOTEBOOKS if p.name not in REFERENCE_NOTEBOOKS], ids=lambda p: p.name
-)
+@pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda p: p.name)
 def test_notebook_does_not_install_packages(path: Path) -> None:
     nb = json.loads(path.read_text(encoding="utf-8"))
     for cell in nb["cells"]:
