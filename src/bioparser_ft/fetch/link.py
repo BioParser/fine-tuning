@@ -25,11 +25,12 @@ import shutil
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Self
 
 from ..linking import paper_key
 from .citations import Paper, clean_doi, group_papers
 from .cli import read_report, write_report_rows
-from .matching import norm, title_recall_in_text, tokens
+from .matching import norm, tokens
 from .pdfcheck import is_pdf
 
 TEXT_PAGES = 3  # The title, the authors and the DOI are on the first pages
@@ -136,23 +137,37 @@ def doi_in_file_name(doi: str, name: str) -> bool:
     return file_id in ids or (len(last) > MIN_ID_CHARS and file_id.endswith(last))
 
 
-def evidence(target: Target, text: str, name: str) -> Evidence:
-    """Compare one file, its text and its name, with one paper."""
+@dataclass(frozen=True, slots=True)
+class FileText:
+    """The text and the name of one file, normalized one time for the comparison with all papers."""
+
+    name: str
+    compact: str  # The text in lower case and without whitespace, for the DOI
+    padded: str  # The normalized words, with a space at each end, for the author and the year
+    words: frozenset[str]  # The title words of the text and of the file name
+
+    @classmethod
+    def of(cls, text: str, name: str) -> Self:
+        # Some file names contain the title, for example "Austral Ecology - 2015 - Arman - Dietary ...pdf"
+        words = f"{text} {Path(name).stem.replace('_', ' ')}"
+        return cls(name, re.sub(r"\s+", "", text).lower(), f" {norm(words)} ", frozenset(tokens(words)))
+
+
+def evidence(target: Target, doc: FileText) -> Evidence:
+    """Compare one file with one paper."""
     doi_in_text = doi_in_name = False
     if target.doi:
-        doi_in_text = target.doi.lower() in re.sub(r"\s+", "", text).lower()
-        doi_in_name = doi_in_file_name(target.doi, name)
-    # Some file names contain the title, for example "Austral Ecology - 2015 - Arman - Dietary ...pdf"
-    words = f"{text} {Path(name).stem.replace('_', ' ')}"
+        doi_in_text = target.doi.lower() in doc.compact
+        doi_in_name = doi_in_file_name(target.doi, doc.name)
     title, title_words = 0.0, 0
     for t in target.titles:
-        n = len(tokens(t))
-        if n and (r := title_recall_in_text(t, words), n) > (title, title_words):
+        title_tokens = tokens(t)
+        n = len(title_tokens)
+        if n and (r := sum(w in doc.words for w in title_tokens) / n, n) > (title, title_words):
             title, title_words = r, n
-    padded = f" {norm(words)} "
     first = norm(target.paper.first_author)
-    author = bool(first) and f" {first} " in padded
-    year = target.paper.year is not None and f" {target.paper.year} " in padded
+    author = bool(first) and f" {first} " in doc.padded
+    year = target.paper.year is not None and f" {target.paper.year} " in doc.padded
     return Evidence(doi_in_text, doi_in_name, title, title_words, author, year)
 
 
@@ -164,9 +179,8 @@ def decide(path: Path, targets: Sequence[Target]) -> Decision:
     text, pages = read_text(data)
     if pages == 0:
         return Decision(path, "skip", reason="pypdf cannot read the file")
-    scored = sorted(
-        ((evidence(t, text, path.name), t) for t in targets), key=lambda s: s[0].rank, reverse=True
-    )
+    doc = FileText.of(text, path.name)  # One time for each file, not for each paper
+    scored = sorted(((evidence(t, doc), t) for t in targets), key=lambda s: s[0].rank, reverse=True)
     best, target = scored[0]
     second = scored[1][0] if len(scored) > 1 else Evidence()
     scan = "" if len(text.strip()) >= MIN_TEXT_CHARS else "no text layer (a scanned document?): "
@@ -328,7 +342,7 @@ def run(args: argparse.Namespace) -> list[Decision]:
             close = difflib.get_close_matches(links[path.name], [t.paper.key for t in targets], n=3)
             raise SystemExit(f"--link: no paper {links[path.name]!r}. Similar names: {close}")
         text, pages = read_text(path.read_bytes())
-        ev = evidence(target, text, path.name)
+        ev = evidence(target, FileText.of(text, path.name))
         action, reason = (
             ("duplicate", f"pdfs/{target.paper.pdf_name} exists") if target.has_pdf else ("move", "")
         )

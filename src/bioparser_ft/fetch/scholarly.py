@@ -7,8 +7,7 @@ DataCite and CORE.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterator
-from concurrent.futures import Executor
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
@@ -88,10 +87,9 @@ def _first(xs: Any) -> str:
 
 
 class Scholarly:
-    def __init__(self, client: PoliteClient, *, email: str | None = None, pool: Executor | None = None):
+    def __init__(self, client: PoliteClient, *, email: str | None = None):
         self.c = client
         self.email = email
-        self.pool = pool  # With a thread pool, the API calls of one stage go out at the same time
         self.s2_key = os.environ.get("S2_API_KEY")
         self.core_key = os.environ.get("CORE_API_KEY")
         self.openalex_key = os.environ.get("OPENALEX_API_KEY")
@@ -103,16 +101,6 @@ class Scholarly:
         if self.openalex_key:
             params["api_key"] = self.openalex_key
         return params | self._mailto()
-
-    def _parallel(self, *calls: Callable[[], Any]) -> list[Any]:
-        """Do the calls at the same time, and return the results in the sequence of the calls.
-
-        The calls go to different hosts. The client keeps the rate limit of each host.
-        """
-        if self.pool is None:
-            return [call() for call in calls]
-        futures = [self.pool.submit(call) for call in calls]
-        return [f.result() for f in futures]
 
     def _check(self, paper: Paper, title: str, year: int | None, authors: list[str]) -> Verdict:
         return verify(paper.citation, paper.title, paper.first_author, paper.year, title, year, authors)
@@ -315,11 +303,9 @@ class Scholarly:
         landing: list[str] = []
         qdoi = quote(doi, safe="/")
         # Stage 0: Unpaywall and OpenAlex. They are the largest open-access indexes and they give the version.
-        u, w = self._parallel(
-            # Unpaywall operates only with a contact email
-            lambda: self.c.get_json(UNPAYWALL + qdoi, {"email": self.email}) if self.email else None,
-            lambda: self.c.get_json(f"{OPENALEX}/doi:{qdoi}", self._openalex_params()),
-        )
+        # Unpaywall operates only with a contact email
+        u = self.c.get_json(UNPAYWALL + qdoi, {"email": self.email}) if self.email else None
+        w = self.c.get_json(f"{OPENALEX}/doi:{qdoi}", self._openalex_params())
         batch: list[Candidate] = []
         for loc in [(u or {}).get("best_oa_location"), *((u or {}).get("oa_locations") or [])]:
             if not loc:
@@ -341,13 +327,11 @@ class Scholarly:
 
         # Stage 1: Europe PMC for PMC copies, Semantic Scholar, and the full-text links in Crossref.
         headers = {"x-api-key": self.s2_key} if self.s2_key else None
-        e, s, cr = self._parallel(
-            lambda: self.c.get_json(
-                EUROPEPMC, {"query": f'DOI:"{doi}"', "format": "json", "resultType": "core", "pageSize": 1}
-            ),
-            lambda: self.c.get_json(S2 + f"DOI:{qdoi}", {"fields": "openAccessPdf"}, headers),
-            lambda: self.c.get_json(f"{CROSSREF}/{qdoi}", self._mailto()),
+        e = self.c.get_json(
+            EUROPEPMC, {"query": f'DOI:"{doi}"', "format": "json", "resultType": "core", "pageSize": 1}
         )
+        s = self.c.get_json(S2 + f"DOI:{qdoi}", {"fields": "openAccessPdf"}, headers)
+        cr = self.c.get_json(f"{CROSSREF}/{qdoi}", self._mailto())
         found: list[Candidate | None] = []
         for r in ((e or {}).get("resultList") or {}).get("result", [])[:1]:
             pmcid = pmcid or r.get("pmcid") or ""
@@ -386,7 +370,7 @@ class Scholarly:
         # Stage 2: landing pages. The doi.org page comes first, because it opens the page of the publisher.
         seen: set[str] = set()
         pages: list[Candidate | None] = []
-        for url in [f"https://doi.org/{doi}", *landing]:
+        for url in [f"https://doi.org/{qdoi}", *landing]:
             if url not in seen:
                 seen.add(url)
                 pages.append(make_candidate(url, "landing", kind="landing", stage=2))

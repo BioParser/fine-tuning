@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Tag
 
@@ -85,24 +85,26 @@ def publisher_pdf_urls(doi: str, crossref_item: dict[str, Any] | None = None) ->
     d = doi.lower()
     prefix, _, suffix = d.partition("/")
     urls: list[str] = []
+    # Old Wiley DOIs (SICI) contain "#", "<" and ";". A raw "#" starts the URL fragment and cuts the URL.
+    q = quote(doi, safe="/")
     if prefix in ("10.1007", "10.1186"):  # Springer and BMC
-        urls.append(f"https://link.springer.com/content/pdf/{doi}.pdf")
+        urls.append(f"https://link.springer.com/content/pdf/{q}.pdf")
     elif prefix in ("10.1002", "10.1111"):  # Wiley
-        urls.append(f"https://onlinelibrary.wiley.com/doi/pdfdirect/{doi}?download=true")
+        urls.append(f"https://onlinelibrary.wiley.com/doi/pdfdirect/{q}?download=true")
     elif prefix == "10.1080":  # Taylor & Francis
-        urls.append(f"https://www.tandfonline.com/doi/pdf/{doi}?download=true")
+        urls.append(f"https://www.tandfonline.com/doi/pdf/{q}?download=true")
     elif prefix == "10.1515":  # De Gruyter, for example the journal Mammalia
-        urls.append(f"https://www.degruyter.com/document/doi/{doi}/pdf")
+        urls.append(f"https://www.degruyter.com/document/doi/{q}/pdf")
     elif prefix == "10.3389":  # Frontiers
-        urls.append(f"https://www.frontiersin.org/articles/{doi}/pdf")
+        urls.append(f"https://www.frontiersin.org/articles/{q}/pdf")
     elif prefix == "10.1098":  # Royal Society
-        urls.append(f"https://royalsocietypublishing.org/doi/pdf/{doi}")
+        urls.append(f"https://royalsocietypublishing.org/doi/pdf/{q}")
     elif prefix == "10.1038":  # Nature journals
-        urls.append(f"https://www.nature.com/articles/{suffix}.pdf")
+        urls.append(f"https://www.nature.com/articles/{quote(suffix)}.pdf")
     elif prefix == "10.7717" and (m := re.match(r"peerj\.(\d+)", suffix)):
         urls.append(f"https://peerj.com/articles/{m.group(1)}.pdf")
     elif prefix == "10.1371" and (m := re.match(r"journal\.(\w{4})\.", suffix)) and m.group(1) in _PLOS:
-        urls.append(f"https://journals.plos.org/{_PLOS[m.group(1)]}/article/file?id={doi}&type=printable")
+        urls.append(f"https://journals.plos.org/{_PLOS[m.group(1)]}/article/file?id={q}&type=printable")
     elif prefix == "10.1016":  # Elsevier: the URL contains the PII. It operates only for open-access PDFs.
         for alt in (crossref_item or {}).get("alternative-id") or []:
             # For example S1319562X22007082. A PII has 17 characters: S, the 8-character ISSN,

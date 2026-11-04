@@ -14,6 +14,7 @@ import json
 import os
 import threading
 import time
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -129,6 +130,8 @@ def test_publisher_patterns() -> None:
     assert elsevier == [
         "https://www.sciencedirect.com/science/article/pii/S1319562X22007082/pdfft?isDTMRedir=true&download=true"
     ]
+    sici = "10.1002/(sici)1098-2795(199709)48:1<1::aid-mrd1>3.0.co;2-#"
+    assert publisher_pdf_urls(sici)[0].endswith("2-%23?download=true")  # "#" does not cut the URL
     assert publisher_pdf_urls("10.9999/unknown") == []
 
 
@@ -278,6 +281,23 @@ def test_overrides_split_and_fix(tmp_path: Path) -> None:
     ]
 
 
+def test_report_round_trip_is_stable(tmp_path: Path) -> None:
+    """The fetch command and bioparser-link-pdfs read the report and write it again. No cell may change."""
+    from bioparser_ft.fetch.citations import Paper
+    from bioparser_ft.fetch.cli import Outcome, read_report, write_report, write_report_rows
+    from bioparser_ft.fetch.scholarly import Resolution
+
+    citation = 'Garcia, A. "Systematics of bats." Zootaxa 12 (2023): 1-5. C:\\data'
+    paper = Paper("Garcia, 2023", citation, ["ETS_Garcia, 2023.tsv"])
+    report = tmp_path / "report.tsv"
+    write_report(report, [Outcome(paper, Resolution(), "not_found")])
+    for _ in range(3):
+        write_report(report, [Outcome(paper, Resolution(), "exists")])  # A second fetch run
+        write_report_rows(report, read_report(report).values())  # bioparser-link-pdfs --apply
+    row = read_report(report)["Garcia, 2023"]
+    assert (row["status"], row["citation"]) == ("exists", citation)
+
+
 # ----------------------------------------------------------------------- browser
 CHROMIUM = os.environ.get("BIOPARSER_CHROMIUM")
 
@@ -323,7 +343,10 @@ def test_browser_auto_mode(tmp_path: Path, page: str) -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Site)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        with BrowserFetcher(profile_dir=tmp_path / "profile", headless=True, executable_path=CHROMIUM) as bf:
+        # CI runners often cannot start the Chromium sandbox. These tests examine the PDF capture.
+        with BrowserFetcher(
+            profile_dir=tmp_path / "profile", headless=True, executable_path=CHROMIUM, sandbox=False
+        ) as bf:
             got = bf.fetch_auto(f"http://127.0.0.1:{server.server_port}{page}")
         assert got is not None, f"no PDF captured from {page}"
         data, url = got
@@ -341,7 +364,9 @@ def test_browser_manual_mode_waits_and_times_out(tmp_path: Path) -> None:
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_port}"
     try:
-        with BrowserFetcher(profile_dir=tmp_path / "profile", headless=True, executable_path=CHROMIUM) as bf:
+        with BrowserFetcher(
+            profile_dir=tmp_path / "profile", headless=True, executable_path=CHROMIUM, sandbox=False
+        ) as bf:
             got = bf.fetch_manual(f"{base}/human.html", "test paper", timeout_s=30)
             assert got is not None and got[0].startswith(b"%PDF-")
             assert bf.fetch_manual(f"{base}/nothing.html", "no pdf", timeout_s=3) is None
@@ -398,6 +423,20 @@ def test_report_json_safe(tmp_path: Path) -> None:
     from bioparser_ft.fetch.cli import _cell
 
     assert _cell("a\tb\nc") == "a b c" and json.dumps(_cell(None)) == '""'
+
+
+def test_cache_files_do_not_contain_the_api_key(tmp_path: Path) -> None:
+    """OpenAlex gets its key in the URL. The cache must not keep the key on the disk."""
+    client = PoliteClient(
+        cache_dir=tmp_path,
+        delay=0,
+        sleep=lambda s: None,
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"results": []})),
+    )
+    params = {"search": "bats", "api_key": "SECRET-123"}
+    assert client.get_json("https://api.openalex.org/works", params) == {"results": []}
+    files = list(tmp_path.rglob("*.json"))
+    assert files and not any("SECRET-123" in f.read_text(encoding="utf-8") for f in files)
 
 
 def test_oa_candidates_parses_every_source(tmp_path: Path) -> None:
@@ -563,6 +602,23 @@ def test_threads_share_the_rate_limit_of_a_host() -> None:
     assert abs(min(starts["a.example"]) - min(starts["b.example"])) < 0.15
 
 
+def test_get_web_stops_a_slow_download() -> None:
+    """A server that sends the body very slowly cannot keep a worker for a long time."""
+
+    class Slow(httpx.SyncByteStream):
+        def __iter__(self) -> Iterator[bytes]:
+            for _ in range(40):
+                time.sleep(0.05)
+                yield b"%PDF-"
+
+    client = PoliteClient(
+        delay=0, transport=httpx.MockTransport(lambda r: httpx.Response(200, stream=Slow()))
+    )
+    start = time.monotonic()
+    assert client.get_web("https://slow.example/a.pdf", max_seconds=0.2) is None
+    assert time.monotonic() - start < 1.5  # The full body needs 2 s
+
+
 def test_server_rate_limit_and_retry_after() -> None:
     calls: list[str] = []
 
@@ -580,35 +636,6 @@ def test_server_rate_limit_and_retry_after() -> None:
     assert client.delay_for("api.crossref.org") == 0.5  # The server gives 2 requests in 1 second
     assert client.get_json("https://slow.example/busy") == {}
     assert calls.count("/busy") == 2 and max(slept) > 6  # The client waited for the Retry-After time
-
-
-def test_oa_candidates_parallel_stages_are_equal(tmp_path: Path) -> None:
-    """With a thread pool, the API calls of one stage go out at the same time. The batches do not change."""
-    from bioparser_ft.fetch.scholarly import Scholarly
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        host = request.url.host
-        if host == "api.unpaywall.org":
-            loc = {"url_for_pdf": "https://repo.example/x.pdf", "version": "acceptedVersion"}
-            return httpx.Response(200, json={"best_oa_location": loc, "oa_status": "green"})
-        if host == "api.openalex.org":
-            return httpx.Response(200, json={"best_oa_location": {"pdf_url": "https://pub.example/x.pdf"}})
-        if host == "api.semanticscholar.org":
-            return httpx.Response(200, json={"openAccessPdf": {"url": "https://s2.example/x.pdf"}})
-        return httpx.Response(404)
-
-    def stages(pool: ThreadPoolExecutor | None) -> tuple[list[list[tuple[str, str]]], str]:
-        client = PoliteClient(
-            email="t@example.org", delay=0, transport=httpx.MockTransport(handler), sleep=lambda s: None
-        )
-        info: dict[str, str] = {}
-        sch = Scholarly(client, email="t@example.org", pool=pool)
-        batches = [[(c.source, c.url) for c in b] for b in sch.oa_candidates("10.1000/x", info)]
-        return batches, info["oa_status"]
-
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        assert stages(pool) == stages(None)
-    assert stages(None)[1] == "green"
 
 
 def test_headless_pass_uses_parallel_browsers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -664,7 +691,7 @@ def test_parallel_headless_pass_with_chromium(tmp_path: Path) -> None:
     title = "Echolocation calls of cave bats"
     try:
         args = build_parser().parse_args([
-            "--browser-workers", "2", "--browser-executable", CHROMIUM,
+            "--browser-workers", "2", "--browser-executable", CHROMIUM, "--no-browser-sandbox",
             "--out-dir", str(tmp_path / "pdfs"), "--browser-profile", str(tmp_path / "profile"),
         ])  # fmt: skip
         outcomes = [
@@ -701,3 +728,28 @@ def test_rate_limit_applies_to_each_redirect_hop() -> None:
     for host, gap in (("doi.org", 0.18), ("pub.example", 0.28)):
         t = sorted(starts[host])
         assert all(later - earlier >= gap for earlier, later in itertools.pairwise(t)), host
+
+
+def test_client_refuses_internal_addresses() -> None:
+    """A landing page can send the client to 127.0.0.1 or 169.254.169.254. The client does not go there."""
+    hits: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            hits.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        client = PoliteClient(delay=0, sleep=lambda s: None)  # The real transport, with the check
+        base = f"http://127.0.0.1:{server.server_port}"
+        assert client.get_web(f"{base}/landing") is None
+        assert client.get_json(f"{base}/api") is None
+    finally:
+        server.shutdown()
+    assert hits == []

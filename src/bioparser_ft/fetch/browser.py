@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .net import MAX_PDF_BYTES
 from .pdfcheck import is_pdf
 
 COOKIE_BUTTONS = (
@@ -90,11 +91,13 @@ class BrowserFetcher:
         executable_path: str | None = None,
         channel: str | None = None,
         nav_timeout_s: float = 45.0,
+        sandbox: bool = True,
     ):
         self.profile_dir = profile_dir
         self.headless = headless
         self.executable_path = executable_path
         self.channel = channel
+        self.sandbox = sandbox
         self.nav_timeout_ms = nav_timeout_s * 1000
         self._responses: list[Any] = []
         self._downloads: list[Any] = []
@@ -102,6 +105,7 @@ class BrowserFetcher:
 
     def __enter__(self) -> BrowserFetcher:
         try:
+            from playwright.sync_api import Error as PlaywrightError
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
             raise SystemExit(
@@ -113,12 +117,24 @@ class BrowserFetcher:
             "user_data_dir": str(self.profile_dir),
             "headless": self.headless,
             "accept_downloads": True,
+            # The browser opens pages of unknown sites. Playwright starts Chromium without its sandbox
+            # by default. Without the sandbox, an attack on the browser runs code as your user.
+            "chromium_sandbox": self.sandbox,
         }
         if self.executable_path:
             kwargs["executable_path"] = self.executable_path
         if self.channel:
             kwargs["channel"] = self.channel
-        self.ctx = self._pw.chromium.launch_persistent_context(**kwargs)
+        try:
+            self.ctx = self._pw.chromium.launch_persistent_context(**kwargs)
+        except PlaywrightError as exc:
+            self._pw.stop()
+            if self.sandbox and "sandbox" in str(exc).lower():
+                raise SystemExit(
+                    "Chromium cannot start its sandbox on this computer. Use --browser-channel chrome, "
+                    "or use --no-browser-sandbox if you accept the risk."
+                ) from exc
+            raise
         self.ctx.set_default_navigation_timeout(self.nav_timeout_ms)
         self.ctx.on("page", self._attach)
         for page in self.ctx.pages:
@@ -142,17 +158,21 @@ class BrowserFetcher:
             self._responses.append(resp)  # The code reads the body later, outside the event handler
 
     def _collect(self) -> tuple[bytes, str] | None:
+        # Use the size limit of the HTTP mode (MAX_PDF_BYTES). One very large download can fill the memory.
         for dl in list(self._downloads):
             try:
                 path = dl.path()  # This call waits until the download is complete
-                data = Path(path).read_bytes() if path else b""
+                if not path or Path(path).stat().st_size > MAX_PDF_BYTES:
+                    continue
+                data = Path(path).read_bytes()
             except Exception:
                 continue
             if is_pdf(data):
                 return data, dl.url
         for resp in list(self._responses):
             try:
-                data = resp.body() if resp.status == 200 else b""
+                too_large = int(resp.headers.get("content-length") or 0) > MAX_PDF_BYTES
+                data = resp.body() if resp.status == 200 and not too_large else b""
             except Exception:
                 continue
             if is_pdf(data):
@@ -221,7 +241,8 @@ class BrowserFetcher:
                 meta = page.evaluate(_META_JS)
             except PlaywrightError:
                 meta = None
-            if meta:
+            # The page gives this URL. Open only http and https URLs, not file:, data: or javascript:.
+            if meta and meta.startswith(("https://", "http://")):
                 with contextlib.suppress(PlaywrightError):
                     page.goto(meta, wait_until="commit")
                 if got := self._wait(10):

@@ -57,6 +57,9 @@ REPORT_COLUMNS = (
     "title_recall", "pages", "bytes", "sha256", "tsv_files", "citation", "matched_title", "notes",
 )  # fmt: skip
 MISSING = ("not_found", "unverified", "unresolved")
+# Landing pages are smaller than 2 MB. html.parser needs approximately 2 s and 50 MB of memory for
+# each MB. For this reason, a 150 MB page can stop a worker for 5 minutes and use 7 GB of memory.
+MAX_HTML_BYTES = 5 * 1024 * 1024
 _PRINT_LOCK = threading.Lock()
 
 
@@ -111,6 +114,9 @@ def fetch_candidate(
         return Got(fetched.body, fetched.url, cand.source, check_pdf(fetched.body, title, doi))
     if "html" not in fetched.content_type and fetched.body.lstrip()[:1] != b"<":
         notes.append(f"{cand.source}: {fetched.content_type or 'unknown content'}")
+        return None
+    if len(fetched.body) > MAX_HTML_BYTES:
+        notes.append(f"{cand.source}: HTML page larger than {MAX_HTML_BYTES} bytes, not parsed")
         return None
     best = None
     for link in pdf_links_from_html(fetched.body, fetched.url):
@@ -186,7 +192,7 @@ def _apply(oc: Outcome, got: Got | None, out_dir: Path) -> None:
 def _landing_url(oc: Outcome, *, manual: bool, proxy_prefix: str | None) -> str | None:
     r = oc.resolution
     url = (
-        (f"https://doi.org/{r.doi}" if r.doi else None)
+        (f"https://doi.org/{quote(r.doi, safe='/')}" if r.doi else None)
         or oc.paper.url
         or (r.landing[0] if r.landing else None)
     )
@@ -257,6 +263,7 @@ def _browser_worker(
                 headless=not manual,
                 executable_path=args.browser_executable,
                 channel=args.browser_channel,
+                sandbox=not args.no_browser_sandbox,
             )
         )
         while not stop.is_set():
@@ -293,7 +300,10 @@ def read_report(path: Path) -> dict[str, dict[str, str]]:
     if not path.exists():
         return {}
     with path.open(newline="", encoding="utf-8") as fh:
-        return {row["key"]: row for row in csv.DictReader(fh, delimiter="\t")}
+        # Read with the dialect of write_report_rows. With a different dialect, each read and write
+        # adds backslashes before the quotation marks.
+        reader = csv.DictReader(fh, delimiter="\t", quoting=csv.QUOTE_NONE, escapechar="\\")
+        return {row["key"]: row for row in reader}
 
 
 def write_report(path: Path, outcomes: list[Outcome]) -> None:
@@ -370,7 +380,7 @@ def summarise(outcomes: list[Outcome], report: Path) -> None:
             f"{len(missing) - closed - free} unknown (no DOI, or no answer from Unpaywall and OpenAlex)"
         )
     for o in missing[:20]:
-        where = f"https://doi.org/{o.resolution.doi}" if o.resolution.doi else "no DOI found"
+        where = f"https://doi.org/{quote(o.resolution.doi, safe='/')}" if o.resolution.doi else "no DOI found"
         print(f"  {o.status:10} oa:{o.oa_status or '-':7} {o.paper.key[:55]:55} {where}")
     if len(missing) > 20:
         print(f"  ... and {len(missing) - 20} more")
@@ -448,11 +458,9 @@ def run(args: argparse.Namespace, client: PoliteClient | None = None) -> list[Ou
     if client is None:
         client = PoliteClient(email=email, cache_dir=args.cache_dir, delay=args.delay, refresh=args.refresh)
     workers = max(1, args.workers)
-    # The paper threads wait for the API threads. For this reason, they use two different pools:
-    # one pool cannot wait for itself (no deadlock).
+    # The rate limit of each host sets the speed, so one pool for the papers is sufficient.
     paper_pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="paper")
-    api_pool = ThreadPoolExecutor(max_workers=3 * workers, thread_name_prefix="api") if workers > 1 else None
-    sch = Scholarly(client, email=email, pool=api_pool)
+    sch = Scholarly(client, email=email)
     stop = threading.Event()
     results: dict[int, Outcome] = {}
     try:
@@ -475,8 +483,6 @@ def run(args: argparse.Namespace, client: PoliteClient | None = None) -> list[Ou
         raise
     finally:
         paper_pool.shutdown(wait=False, cancel_futures=True)
-        if api_pool is not None:
-            api_pool.shutdown(wait=False, cancel_futures=True)
         client.close()
         outcomes = [results[i] for i in sorted(results)]
         write_report(args.report, outcomes)
@@ -563,6 +569,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--browser-channel", help="use an installed browser: chrome or msedge")
     ap.add_argument("--browser-executable", help="the path to a Chromium or Chrome binary")
+    ap.add_argument(
+        "--no-browser-sandbox",
+        action="store_true",
+        help="start Chromium without its sandbox. Use this only if Chromium cannot start: "
+        "the browser opens pages of unknown sites.",
+    )
     return ap
 
 

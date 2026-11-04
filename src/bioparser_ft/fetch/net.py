@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import ipaddress
 import json
 import os
 import re
+import socket
 import threading
 import time
 from collections.abc import Callable
@@ -38,6 +40,9 @@ WEB_HEADERS = {
 }
 RETRY_STATUS = {429, 500, 502, 503, 504}
 MAX_PDF_BYTES = 150 * 1024 * 1024
+# httpx limits the time of each read, not the time of the full body. A server that sends one byte
+# every 25 seconds can keep a worker for days. This is the limit for the full body.
+MAX_DOWNLOAD_SECONDS = 300.0
 # The minimum time in seconds between the starts of two requests to one host. The API values are
 # below the published limits of the services. All other hosts (the publishers and the
 # repositories) use the `delay` value, 1 second by default.
@@ -59,6 +64,20 @@ MAX_PER_HOST = 2  # The maximum number of open requests to the first host of a U
 
 def host_of(url: httpx.URL) -> str:
     return url.host if url.port is None else f"{url.host}:{url.port}"
+
+
+def is_public_host(host: str) -> bool:
+    """Return False if the host is, or resolves to, a loopback, private or link-local address.
+
+    A landing page, a redirect or an API record can send the client to an internal address,
+    for example 169.254.169.254 (cloud metadata) or 192.168.1.1 (a router). If DNS cannot
+    resolve the host, return True: httpx then gives the DNS error.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except (OSError, UnicodeError):
+        return True
+    return all(ipaddress.ip_address(str(info[4][0]).split("%", 1)[0]).is_global for info in infos)
 
 
 @dataclass
@@ -98,14 +117,17 @@ class PoliteClient:
         self.api_headers = {"User-Agent": ua, "Accept": "application/json"}
         # One client has one cookie jar. For this reason, the PDF request sends the cookies of the
         # landing page. The connection pool and the cookie jar of httpx have locks for threads.
+        hooks: list[Callable[[httpx.Request], None]] = [self._before_request]
+        if transport is None:  # The real network. The tests use a mock transport and no DNS.
+            hooks.insert(0, self._refuse_internal_host)
         self.http = httpx.Client(
             follow_redirects=True,
             max_redirects=10,
             timeout=httpx.Timeout(timeout, connect=10.0),
             transport=transport,
-            # The hook runs before each request and before each redirect. For this reason, the rate
-            # limit of a publisher also applies to the requests that come through doi.org.
-            event_hooks={"request": [self._before_request]},
+            # The hooks run before each request and before each redirect. For this reason, the rate
+            # limit of a publisher and the address check also apply to the requests through doi.org.
+            event_hooks={"request": hooks},
         )
 
     def close(self) -> None:
@@ -118,6 +140,10 @@ class PoliteClient:
 
     def _before_request(self, request: httpx.Request) -> None:
         self._throttle(host_of(request.url))
+
+    def _refuse_internal_host(self, request: httpx.Request) -> None:
+        if not is_public_host(request.url.host):
+            raise httpx.ConnectError(f"refused: {request.url.host} is not a public address", request=request)
 
     def _throttle(self, host: str) -> None:
         """Wait for the next free start time of the host.
@@ -216,16 +242,24 @@ class PoliteClient:
         if path:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_name(f"{path.name}.{os.getpid()}-{threading.get_ident()}.tmp")
-            tmp.write_text(json.dumps({"url": str(resp.url), "data": data}), encoding="utf-8")
+            # Do not write the API key to the disk. The URL in the file is only for persons to read.
+            stored_url = resp.url.copy_remove_param("api_key")
+            tmp.write_text(json.dumps({"url": str(stored_url), "data": data}), encoding="utf-8")
             tmp.replace(path)  # An atomic write: other threads read the old file or the new file
         return data
 
     def get_web(
-        self, url: str, *, referer: str | None = None, max_bytes: int = MAX_PDF_BYTES
+        self,
+        url: str,
+        *,
+        referer: str | None = None,
+        max_bytes: int = MAX_PDF_BYTES,
+        max_seconds: float = MAX_DOWNLOAD_SECONDS,
     ) -> Fetched | None:
         """Send a GET request like a browser, for landing pages and PDF files.
 
-        The answer comes as a stream. The function stops when the answer is larger than max_bytes.
+        The answer comes as a stream. The function stops when the answer is larger than max_bytes,
+        or when the body takes more than max_seconds.
         """
         if urlsplit(url).scheme not in ("http", "https"):
             return None
@@ -237,10 +271,11 @@ class PoliteClient:
             try:
                 # The request hook does the rate limit of each host, also after a redirect
                 with self._slot(host), self.http.stream("GET", url, headers=headers) as resp:
+                    deadline = time.monotonic() + max_seconds
                     chunks, size = [], 0
                     for chunk in resp.iter_bytes():
                         size += len(chunk)
-                        if size > max_bytes:
+                        if size > max_bytes or time.monotonic() > deadline:
                             return None
                         chunks.append(chunk)
                     return Fetched(
