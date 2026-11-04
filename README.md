@@ -60,9 +60,10 @@ The command uses these sources, in this sequence:
 4. With the option `--manual`: a visible browser. You click the link or log in, and the command
    saves the PDF file. Only this option uses the library proxy of `--proxy-prefix`.
 
-The command makes sure that each PDF file contains the title or the DOI of the article. It waits
-1 second between two requests to the same host. It keeps the API answers in
-`fine_tuning_data/.fetch_cache/`, so a second run is fast.
+The command makes sure that each PDF file contains the title or the DOI of the article. It works
+on 6 papers at the same time, and each host keeps its own rate limit. It keeps the API answers in
+`fine_tuning_data/.fetch_cache/`, so a second run is fast. For the meaning of the output and the
+speed options, refer to [The output of the command](fine_tuning_data/README.md#the-output-of-the-command).
 
 **CAUTION:** Do these steps outside the network of the university. On the university network,
 the automatic steps also download articles that are not open access. The terms of the library do

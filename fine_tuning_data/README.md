@@ -125,6 +125,73 @@ The command also adds rows to `manifest.tsv` for the papers with more than one T
 Abraham 2022, Jérémy 2023, Morenikeji 2022/2023 and Wimberly 2023. Morenikeji 2022 and
 Morenikeji 2023 have the same citation. Ask the client if they are one article.
 
+### The output of the command
+
+The command writes one line for each paper, for example:
+
+```
+[1/175] not_found  high   doi:crossref        pdf:-                 oa:closed  Example et al., 2020
+```
+
+| Column | Description |
+|---|---|
+| `[1/175]` | The number of the paper in this run. The papers run at the same time, so the sequence of the lines can change. |
+| `not_found` | The status of the paper |
+| `high` | The confidence of the DOI match |
+| `doi:crossref` | The service that found the DOI |
+| `pdf:unpaywall` | The source of the PDF file. The value `-` shows that there is no PDF file. |
+| `oa:closed` | The open-access status from Unpaywall or OpenAlex |
+
+The statuses:
+
+- `downloaded`: the PDF file is in `pdfs/`, and it contains the title or the DOI.
+- `exists`: the PDF file is there from an earlier run.
+- `unverified`: the command found a PDF file, but the file does not contain the title or the
+  DOI. Examine the file in `pdfs/_unverified/`.
+- `not_found`: the command found the DOI, but it did not find a PDF file.
+- `unresolved`: the command did not find a DOI that agrees with the citation.
+
+The confidence of the DOI match. The command compares the title, the year and the first author
+of each search result with the citation:
+
+- `high`: at least 90% of the title words of the result are in the citation. At least 70% of the
+  title words of the citation are in the result. The year agrees to ±1 year, and the first author
+  agrees.
+- `medium`: at least 80% and 50% of the title words agree, and the year or the first author
+  agrees. Examine these matches.
+- `low`: the command does not use the result.
+- `none`: no search result agrees with the citation.
+- `given`: the DOI comes from the citation or from `doi_overrides.tsv`.
+
+The open-access status:
+
+- `gold`, `diamond`, `hybrid` or `bronze`: the publisher gives a free copy.
+- `green`: a repository has a free copy.
+- `closed`: there is no free copy. Only part d, with EZproxy, can get the article.
+- `-`: there is no information, because there is no DOI or no answer from the APIs.
+
+A `not_found` paper with `oa:closed` is normal. The automatic parts get only free copies, and
+part d gets the other papers. A `not_found` paper with a different status has a free copy, but
+the download failed. Usually, the site blocks programs. The headless browser of part c tries
+these papers again.
+
+At the end, the command shows the number of papers for each status. It also shows how many of
+the papers that it did not find are closed access.
+
+### Speed
+
+The command works on 6 papers at the same time. To change this number, use `--workers`. Each
+host keeps its own rate limit:
+
+- The scholarly APIs: 5 requests each second or less. Semantic Scholar: 1 request each second.
+- doi.org: 5 requests each second. The publisher after the redirect keeps its own limit.
+- Each publisher and each repository: 1 new request each second. To change this time, use
+  `--delay`.
+
+The headless browser pass uses 3 browsers at the same time. To change this number, use
+`--browser-workers`. Each browser uses memory. If your computer is slow, use
+`--browser-workers 1`. The manual pass uses one browser, because you work with one window.
+
 ### Library access with EZproxy
 
 Many of the articles are not open access. The University of Helsinki pays for access to them.

@@ -8,9 +8,12 @@ and a Chromium binary are available (BIOPARSER_CHROMIUM=/path/to/chrome).
 from __future__ import annotations
 
 import csv
+import itertools
 import json
 import os
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import ClassVar
@@ -189,7 +192,9 @@ def fake_web(request: httpx.Request) -> httpx.Response:
     if host == "api.unpaywall.org":
         if path.endswith("10.1000/a"):
             loc = {"url_for_pdf": "https://repo.example.org/a.pdf", "version": "publishedVersion"}
-            return httpx.Response(200, json={"best_oa_location": loc, "oa_locations": [loc]})
+            return httpx.Response(
+                200, json={"best_oa_location": loc, "oa_locations": [loc], "oa_status": "green"}
+            )
         return httpx.Response(404, json={"error": True})
     if host == "doi.org" and path == "/10.1000/b":
         html = '<html><head><meta name="citation_pdf_url" content="https://publisher.example.com/b.pdf"></head></html>'
@@ -256,6 +261,7 @@ def test_fetch_end_to_end(tmp_path: Path):
     # The citation_pdf_url on the landing page of the DOI
     assert outcomes["Smith, 2021"].got.source == "landing"
     assert outcomes["Nobody, 2019"].status == "unresolved"  # The code refuses the incorrect Crossref result
+    assert outcomes["Doe and Roe, 2020"].oa_status == "green"
     assert (out / "Doe and Roe, 2020.pdf").read_bytes().startswith(b"%PDF-")
     assert not any(
         "repo.example.org" in c for c in calls[calls.index("https://repo.example.org/a.pdf") + 1 :]
@@ -269,6 +275,7 @@ def test_fetch_end_to_end(tmp_path: Path):
         report["Doe and Roe, 2020"]["doi"] == "10.1000/a" and report["Doe and Roe, 2020"]["verified"] == "yes"
     )
     assert len(report["Smith, 2021"]["sha256"]) == 64
+    assert report["Doe and Roe, 2020"]["oa_status"] == "green"
 
     calls.clear()  # Second run: the PDF files are there and the cache has the API answers, so there is no network traffic
     again = {o.paper.key: o.status for o in run(args, client=_client(tmp_path, calls))}
@@ -510,3 +517,203 @@ def test_oa_candidates_parses_every_source(tmp_path: Path):
         and "https://pub.example/tdm/x.xml" not in stage1
     )
     assert [u for _, u in stages[2]] == ["https://doi.org/10.1000/x", "https://pub.example/x"]
+
+
+# ----------------------------------------------------------------------- concurrency
+def _args(tmp_path: Path, tsv: Path, *extra: str):
+    return build_parser().parse_args([
+        "--tsv-dir", str(tsv), "--out-dir", str(tmp_path / "pdfs"), "--report", str(tmp_path / "report.tsv"),
+        "--manifest", str(tmp_path / "manifest.tsv"), "--overrides", str(tmp_path / "none.tsv"),
+        "--email", "test@example.org", *extra,
+    ])  # fmt: skip
+
+
+@pytest.mark.parametrize("workers", ["1", "4"])
+def test_workers_give_the_same_results(tmp_path: Path, workers: str):
+    """The papers run at the same time, but the results and the report sequence do not change."""
+    tsv = _setup(tmp_path)
+    outcomes = run(_args(tmp_path, tsv, "--workers", workers), client=_client(tmp_path, []))
+    assert [(o.paper.key, o.status) for o in outcomes] == [
+        ("Doe and Roe, 2020", "downloaded"),
+        ("Nobody, 2019", "unresolved"),
+        ("Smith, 2021", "downloaded"),
+    ]
+    with (tmp_path / "report.tsv").open(encoding="utf-8") as fh:
+        assert [r["key"] for r in csv.DictReader(fh, delimiter="\t")] == [o.paper.key for o in outcomes]
+
+
+def test_error_in_one_paper_does_not_stop_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from bioparser_ft.fetch import cli
+
+    real = cli.fetch_http
+
+    def fetch_http(client, sch, paper, res, info=None):
+        if paper.key.startswith("Smith"):
+            raise RuntimeError("broken PDF parser")
+        return real(client, sch, paper, res, info)
+
+    monkeypatch.setattr(cli, "fetch_http", fetch_http)
+    tsv = _setup(tmp_path)
+    outcomes = {o.paper.key: o for o in run(_args(tmp_path, tsv), client=_client(tmp_path, []))}
+    assert outcomes["Doe and Roe, 2020"].status == "downloaded"
+    assert outcomes["Smith, 2021"].status == "not_found"
+    assert "broken PDF parser" in outcomes["Smith, 2021"].notes[0]
+
+
+def test_threads_share_the_rate_limit_of_a_host():
+    """Two requests to one host start 0.1 s apart or more. Two different hosts do not wait for each other."""
+    starts: dict[str, list[float]] = {}
+    lock = threading.Lock()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        with lock:
+            starts.setdefault(request.url.host, []).append(time.monotonic())
+        return httpx.Response(200, json={})
+
+    client = PoliteClient(delay=0.1, transport=httpx.MockTransport(handler))
+    urls = [f"https://{host}/{i}" for host in ("a.example", "b.example") for i in range(4)]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert list(pool.map(client.get_json, urls)) == [{}] * 8
+    for host in ("a.example", "b.example"):
+        t = sorted(starts[host])
+        assert all(later - earlier >= 0.09 for earlier, later in itertools.pairwise(t))
+    assert abs(min(starts["a.example"]) - min(starts["b.example"])) < 0.15
+
+
+def test_server_rate_limit_and_retry_after():
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/busy" and calls.count("/busy") == 1:
+            return httpx.Response(429, headers={"Retry-After": "7"})
+        return httpx.Response(
+            200, json={}, headers={"X-Rate-Limit-Limit": "2", "X-Rate-Limit-Interval": "1s"}
+        )
+
+    slept: list[float] = []
+    client = PoliteClient(delay=0.0, transport=httpx.MockTransport(handler), sleep=slept.append)
+    assert client.get_json("https://api.crossref.org/works/10.1000/x") == {}
+    assert client.delay_for("api.crossref.org") == 0.5  # The server gives 2 requests in 1 second
+    assert client.get_json("https://slow.example/busy") == {}
+    assert calls.count("/busy") == 2 and max(slept) > 6  # The client waited for the Retry-After time
+
+
+def test_oa_candidates_parallel_stages_are_equal(tmp_path: Path):
+    """With a thread pool, the API calls of one stage go out at the same time. The batches do not change."""
+    from bioparser_ft.fetch.scholarly import Scholarly
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        if host == "api.unpaywall.org":
+            loc = {"url_for_pdf": "https://repo.example/x.pdf", "version": "acceptedVersion"}
+            return httpx.Response(200, json={"best_oa_location": loc, "oa_status": "green"})
+        if host == "api.openalex.org":
+            return httpx.Response(200, json={"best_oa_location": {"pdf_url": "https://pub.example/x.pdf"}})
+        if host == "api.semanticscholar.org":
+            return httpx.Response(200, json={"openAccessPdf": {"url": "https://s2.example/x.pdf"}})
+        return httpx.Response(404)
+
+    def stages(pool):
+        client = PoliteClient(
+            email="t@example.org", delay=0, transport=httpx.MockTransport(handler), sleep=lambda s: None
+        )
+        info: dict = {}
+        sch = Scholarly(client, email="t@example.org", pool=pool)
+        batches = [[(c.source, c.url) for c in b] for b in sch.oa_candidates("10.1000/x", info)]
+        return batches, info["oa_status"]
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        assert stages(pool) == stages(None)
+    assert stages(None)[1] == "green"
+
+
+def test_headless_pass_uses_parallel_browsers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Each headless browser has its own thread and its own empty profile."""
+    from bioparser_ft.fetch import browser
+    from bioparser_ft.fetch.citations import Paper
+    from bioparser_ft.fetch.cli import Outcome, browser_pass
+    from bioparser_ft.fetch.scholarly import Resolution
+
+    seen: set[tuple[int, Path]] = set()
+    lock = threading.Lock()
+
+    class FakeBrowser:
+        def __init__(self, *, profile_dir: Path, headless: bool, **kwargs):
+            self.profile_dir = profile_dir
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def fetch_auto(self, url: str):
+            with lock:
+                seen.add((threading.get_ident(), self.profile_dir))
+            time.sleep(0.05)  # The other threads take the next papers in this time
+
+    monkeypatch.setattr(browser, "BrowserFetcher", FakeBrowser)
+    args = build_parser().parse_args(["--browser-workers", "3", "--browser-profile", str(tmp_path / "p")])
+    outcomes = [
+        Outcome(
+            Paper(f"P{i}, 2020", "c", [f"ETS_P{i}, 2020.tsv"]), Resolution(doi=f"10.1000/{i}"), "not_found"
+        )
+        for i in range(9)
+    ]
+    browser_pass(outcomes, args, manual=False)
+    assert len({t for t, _ in seen}) == 3 and len({p for _, p in seen}) == 3
+    assert tmp_path / "p" not in {p for _, p in seen}  # No headless browser uses the saved profile
+
+
+@pytest.mark.skipif(not CHROMIUM, reason="set BIOPARSER_CHROMIUM to a Chromium/Chrome binary")
+def test_parallel_headless_pass_with_chromium(tmp_path: Path):
+    """Two real browsers, each in its own thread with its own Playwright, get four PDF files."""
+    pytest.importorskip("playwright")
+    from bioparser_ft.fetch.citations import Paper
+    from bioparser_ft.fetch.cli import Outcome, browser_pass
+    from bioparser_ft.fetch.scholarly import Resolution
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Site)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    title = "Echolocation calls of cave bats"
+    try:
+        args = build_parser().parse_args([
+            "--browser-workers", "2", "--browser-executable", CHROMIUM,
+            "--out-dir", str(tmp_path / "pdfs"), "--browser-profile", str(tmp_path / "profile"),
+        ])  # fmt: skip
+        outcomes = [
+            Outcome(Paper(f"Bat {i}, 2020", "c", [f"ETS_Bat {i}, 2020.tsv"], url=f"{base}{page}"),
+                    Resolution(title=title), "not_found")
+            for i, page in enumerate(["/landing.html", "/js.html", "/meta.html", "/landing.html"])
+        ]  # fmt: skip
+        browser_pass(outcomes, args, manual=False)
+    finally:
+        server.shutdown()
+    assert [o.status for o in outcomes] == ["downloaded"] * 4
+    assert sorted(p.name for p in (tmp_path / "pdfs").glob("*.pdf")) == [
+        f"Bat {i}, 2020.pdf" for i in range(4)
+    ]
+    assert not (tmp_path / "profile").exists()
+
+
+def test_rate_limit_applies_to_each_redirect_hop():
+    """doi.org only sends redirects. The publisher after the redirect keeps its own rate limit."""
+    starts: dict[str, list[float]] = {}
+    lock = threading.Lock()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        with lock:
+            starts.setdefault(request.url.host, []).append(time.monotonic())
+        if request.url.host == "doi.org":
+            return httpx.Response(302, headers={"Location": f"https://pub.example{request.url.path}"})
+        return httpx.Response(200, html="<html>landing page</html>")
+
+    client = PoliteClient(delay=0.3, transport=httpx.MockTransport(handler))
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        pages = list(pool.map(client.get_web, [f"https://doi.org/10.1000/{i}" for i in range(3)]))
+    assert [p.url for p in pages] == [f"https://pub.example/10.1000/{i}" for i in range(3)]
+    for host, gap in (("doi.org", 0.18), ("pub.example", 0.28)):
+        t = sorted(starts[host])
+        assert all(later - earlier >= gap for earlier, later in itertools.pairwise(t)), host

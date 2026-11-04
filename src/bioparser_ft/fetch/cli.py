@@ -11,6 +11,9 @@ Do these steps in this sequence:
 Do these steps outside the network of the university. Only step 4 uses the library proxy
 and your login. The library terms do not let programs download articles automatically.
 
+The command works on 6 papers at the same time (--workers), and the headless pass uses
+3 browsers (--browser-workers). Each host keeps its own rate limit.
+
 A second run is fast. The cache keeps the API answers, and the code keeps the PDF files
 from the earlier runs.
 
@@ -31,10 +34,13 @@ import contextlib
 import csv
 import hashlib
 import os
+import queue
 import re
 import tempfile
+import threading
 from collections import Counter
 from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
@@ -47,10 +53,17 @@ from .pdfcheck import PdfCheck, check_pdf, is_pdf
 from .scholarly import Candidate, Resolution, Scholarly, make_candidate
 
 REPORT_COLUMNS = (
-    "key", "status", "confidence", "doi", "resolved_by", "pdf_source", "pdf_url", "verified",
+    "key", "status", "confidence", "oa_status", "doi", "resolved_by", "pdf_source", "pdf_url", "verified",
     "title_recall", "pages", "bytes", "sha256", "tsv_files", "citation", "matched_title", "notes",
 )  # fmt: skip
 MISSING = ("not_found", "unverified", "unresolved")
+_PRINT_LOCK = threading.Lock()
+
+
+def _say(text: str) -> None:
+    """Print one message. The lock keeps the lines of different threads apart."""
+    with _PRINT_LOCK:
+        print(text, flush=True)
 
 
 @dataclass
@@ -68,6 +81,7 @@ class Outcome:
     status: str = ""
     got: Got | None = None
     notes: list[str] = field(default_factory=list)
+    oa_status: str = ""  # From Unpaywall or OpenAlex: gold, diamond, hybrid, bronze, green or closed
 
 
 def _better(a: Got | None, b: Got | None) -> Got | None:
@@ -117,11 +131,12 @@ def fetch_candidate(
 
 
 def fetch_http(
-    client: PoliteClient, sch: Scholarly, paper: Paper, res: Resolution
+    client: PoliteClient, sch: Scholarly, paper: Paper, res: Resolution, info: dict | None = None
 ) -> tuple[Got | None, list[str]]:
     """Use the candidates one batch at a time, and stop at the first verified PDF.
 
-    Then the code does not call the APIs of the next batches.
+    Then the code does not call the APIs of the next batches. The function writes the
+    open-access status to info["oa_status"].
     """
     title = res.title or paper.title
     notes: list[str] = []
@@ -131,7 +146,7 @@ def fetch_http(
         if res.candidates:
             yield sorted(res.candidates)
         if res.doi:
-            yield from sch.oa_candidates(res.doi)
+            yield from sch.oa_candidates(res.doi, info)
         elif res.landing:
             yield [c for u in res.landing if (c := make_candidate(u, "landing", kind="landing", stage=2))]
 
@@ -182,17 +197,47 @@ def _landing_url(oc: Outcome, *, manual: bool, proxy_prefix: str | None) -> str 
     return None
 
 
-def browser_pass(outcomes: list[Outcome], args: argparse.Namespace, *, manual: bool) -> None:
-    from .browser import BrowserFetcher
-
+def browser_pass(
+    outcomes: list[Outcome], args: argparse.Namespace, *, manual: bool, stop: threading.Event | None = None
+) -> None:
     pending = [o for o in outcomes if o.status in MISSING]
     if not pending:
         return
-    print(f"\n{'manual' if manual else 'headless browser'} pass: {len(pending)} papers")
+    # A person works with one window at a time. The headless pass can use more browsers.
+    workers = 1 if manual else max(1, min(args.browser_workers, len(pending)))
+    mode = "manual" if manual else "headless browser"
+    more = f", {workers} browsers at the same time" if workers > 1 else ""
+    _say(f"\n{mode} pass: {len(pending)} papers{more}")
     if not manual and args.proxy_prefix:
-        print("  The headless pass does not use --proxy-prefix. Only the --manual pass uses it.")
+        _say("  The headless pass does not use --proxy-prefix. Only the --manual pass uses it.")
+    stop = stop or threading.Event()
+    todo: queue.SimpleQueue[tuple[int, Outcome]] = queue.SimpleQueue()
+    for item in enumerate(pending, 1):
+        todo.put(item)
+    if workers == 1:
+        _browser_worker(todo, len(pending), args, manual=manual, stop=stop)
+        return
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="browser") as pool:
+        futures = [
+            pool.submit(_browser_worker, todo, len(pending), args, manual=False, stop=stop)
+            for _ in range(workers)
+        ]
+        try:
+            for f in futures:
+                f.result()  # An error in a browser thread comes to the main thread here
+        except BaseException:
+            stop.set()  # The other browsers stop after their current paper
+            raise
+
+
+def _browser_worker(
+    todo: queue.SimpleQueue, total: int, args: argparse.Namespace, *, manual: bool, stop: threading.Event
+) -> None:
+    """Get the papers from the queue, one at a time, with one browser. Each thread has its own browser."""
+    from .browser import BrowserFetcher
+
     # The library terms do not let programs download articles automatically. For this reason, only the
-    # manual pass uses the library proxy and the saved profile with your login. The headless pass
+    # manual pass uses the library proxy and the saved profile with your login. Each headless browser
     # starts with a new, empty profile, so it has no login cookies.
     proxy_prefix = args.proxy_prefix if manual else None
     with contextlib.ExitStack() as stack:
@@ -209,15 +254,19 @@ def browser_pass(outcomes: list[Outcome], args: argparse.Namespace, *, manual: b
                 channel=args.browser_channel,
             )
         )
-        for i, oc in enumerate(pending, 1):
+        while not stop.is_set():
+            try:
+                i, oc = todo.get_nowait()
+            except queue.Empty:
+                return
             url = _landing_url(oc, manual=manual, proxy_prefix=proxy_prefix)
             if not url:
                 continue
-            label = f"[{i}/{len(pending)}] {oc.paper.key}"
+            label = f"[{i}/{total}] {oc.paper.key}"
             raw = bf.fetch_manual(url, label, args.manual_timeout) if manual else bf.fetch_auto(url)
             if raw is None:
                 if not manual:
-                    print(f"{label}: the browser found no PDF")
+                    _say(f"{label}: the browser found no PDF")
                 continue
             data, src = raw
             title = oc.resolution.title or oc.paper.title
@@ -227,7 +276,7 @@ def browser_pass(outcomes: list[Outcome], args: argparse.Namespace, *, manual: b
                 Got(data, src, "manual" if manual else "browser", check_pdf(data, title, oc.resolution.doi)),
                 args.out_dir,
             )
-            print(f"{label}: {before} -> {oc.status}")
+            _say(f"{label}: {before} -> {oc.status}")
 
 
 # ------------------------------------------------------------------------ results
@@ -251,7 +300,8 @@ def write_report(path: Path, outcomes: list[Outcome]) -> None:
             continue
         r, g = oc.resolution, oc.got
         rows.append({
-            "key": oc.paper.key, "status": oc.status, "confidence": r.confidence, "doi": r.doi or "",
+            "key": oc.paper.key, "status": oc.status, "confidence": r.confidence,
+            "oa_status": oc.oa_status, "doi": r.doi or "",
             "resolved_by": r.source, "pdf_source": g.source if g else "", "pdf_url": g.url if g else "",
             "verified": ("yes" if g.check.verified else "no") if g else "",
             "title_recall": f"{g.check.title_recall:.2f}" if g and g.check.title_recall is not None else "",
@@ -301,9 +351,17 @@ def summarise(outcomes: list[Outcome], report: Path) -> None:
     if by_source:
         print("downloaded from: " + ", ".join(f"{k} {v}" for k, v in by_source.most_common()))
     missing = [o for o in outcomes if o.status in MISSING]
+    if missing:
+        closed = sum(o.oa_status == "closed" for o in missing)
+        free = sum(o.oa_status not in ("", "closed") for o in missing)
+        print(
+            f"not found: {closed} closed access (only --manual with --proxy-prefix can get them), "
+            f"{free} open access (a free copy exists, but the download failed), "
+            f"{len(missing) - closed - free} unknown (no DOI, or no answer from Unpaywall and OpenAlex)"
+        )
     for o in missing[:20]:
         where = f"https://doi.org/{o.resolution.doi}" if o.resolution.doi else "no DOI found"
-        print(f"  {o.status:10} {o.paper.key[:55]:55} {where}")
+        print(f"  {o.status:10} oa:{o.oa_status or '-':7} {o.paper.key[:55]:55} {where}")
     if len(missing) > 20:
         print(f"  ... and {len(missing) - 20} more")
     print(f"report: {report}")
@@ -315,6 +373,55 @@ def summarise(outcomes: list[Outcome], report: Path) -> None:
 
 
 # ------------------------------------------------------------------------ main
+def process_paper(paper: Paper, client: PoliteClient, sch: Scholarly, args: argparse.Namespace) -> Outcome:
+    """Find the DOI and an open-access PDF file for one paper. The threads of the pool call this function."""
+    target = args.out_dir / paper.pdf_name
+    if target.exists() and not args.refresh:
+        with target.open("rb") as fh:
+            if is_pdf(fh.read(1024)):
+                return Outcome(paper, Resolution(), "exists")
+    res = sch.resolve(paper)
+    oc = Outcome(paper, res, notes=paper.notes + res.notes)
+    if res.confidence == "medium":
+        oc.notes.append(f"medium-confidence match: examine '{res.title[:80]}'")
+    if not (res.doi or res.candidates or res.landing) or (
+        args.min_confidence == "high" and res.confidence == "medium"
+    ):
+        oc.status = "unresolved"
+    elif args.resolve_only:
+        oc.status = "resolved"
+    else:
+        info: dict = {}
+        got, notes = fetch_http(client, sch, paper, res, info)
+        oc.oa_status = info.get("oa_status", "")
+        oc.notes += notes[-8:]
+        _apply(oc, got, args.out_dir)
+    return oc
+
+
+def _process_safely(
+    paper: Paper, client: PoliteClient, sch: Scholarly, args: argparse.Namespace, stop: threading.Event
+) -> Outcome | None:
+    if stop.is_set():
+        return None
+    try:
+        return process_paper(paper, client, sch, args)
+    except Exception as exc:  # An error in one paper must not stop the full run
+        return Outcome(paper, Resolution(), "not_found", notes=[f"error: {exc!r}"])
+
+
+def _progress(done: int, total: int, oc: Outcome) -> None:
+    if oc.status == "exists":
+        _say(f"[{done}/{total}] exists     {oc.paper.key[:60]} (the PDF file is there from an earlier run)")
+        return
+    r = oc.resolution
+    pdf = oc.got.source if oc.got else "-"
+    _say(
+        f"[{done}/{total}] {oc.status:10} {r.confidence:6} doi:{r.source or '-':15} "
+        f"pdf:{pdf:17} oa:{oc.oa_status or '-':7} {oc.paper.key[:60]}"
+    )
+
+
 def run(args: argparse.Namespace, client: PoliteClient | None = None) -> list[Outcome]:
     """Run the full procedure. The tests give a `client` with an httpx.MockTransport."""
     papers = group_papers(args.tsv_dir, args.overrides)
@@ -329,42 +436,38 @@ def run(args: argparse.Namespace, client: PoliteClient | None = None) -> list[Ou
         )
     if client is None:
         client = PoliteClient(email=email, cache_dir=args.cache_dir, delay=args.delay, refresh=args.refresh)
-    sch = Scholarly(client, email=email)
-    outcomes: list[Outcome] = []
+    workers = max(1, args.workers)
+    # The paper threads wait for the API threads. For this reason, they use two different pools:
+    # one pool cannot wait for itself (no deadlock).
+    paper_pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="paper")
+    api_pool = ThreadPoolExecutor(max_workers=3 * workers, thread_name_prefix="api") if workers > 1 else None
+    sch = Scholarly(client, email=email, pool=api_pool)
+    stop = threading.Event()
+    results: dict[int, Outcome] = {}
     try:
-        for i, paper in enumerate(papers, 1):
-            target = args.out_dir / paper.pdf_name
-            if target.exists() and not args.refresh:
-                with target.open("rb") as fh:
-                    if is_pdf(fh.read(1024)):
-                        outcomes.append(Outcome(paper, Resolution(), "exists"))
-                        continue
-            res = sch.resolve(paper)
-            oc = Outcome(paper, res, notes=paper.notes + res.notes)
-            if res.confidence == "medium":
-                oc.notes.append(f"medium-confidence match: examine '{res.title[:80]}'")
-            if not (res.doi or res.candidates or res.landing) or (
-                args.min_confidence == "high" and res.confidence == "medium"
-            ):
-                oc.status = "unresolved"
-            elif args.resolve_only:
-                oc.status = "resolved"
-            else:
-                got, notes = fetch_http(client, sch, paper, res)
-                oc.notes += notes[-8:]
-                _apply(oc, got, args.out_dir)
-            outcomes.append(oc)
-            src = oc.got.source if oc.got else res.source or "-"
-            print(
-                f"[{i}/{len(papers)}] {oc.status:10} {res.confidence:6} {src:15} {paper.key[:60]}", flush=True
-            )
+        futures = {
+            paper_pool.submit(_process_safely, paper, client, sch, args, stop): i
+            for i, paper in enumerate(papers)
+        }
+        for done, fut in enumerate(as_completed(futures), 1):
+            if (oc := fut.result()) is not None:
+                results[futures[fut]] = oc
+                _progress(done, len(papers), oc)
+        outcomes = [results[i] for i in sorted(results)]  # The sequence of the TSV files
         if not args.resolve_only:
             if args.browser:
-                browser_pass(outcomes, args, manual=False)
+                browser_pass(outcomes, args, manual=False, stop=stop)
             if args.manual:
-                browser_pass(outcomes, args, manual=True)
+                browser_pass(outcomes, args, manual=True, stop=stop)
+    except BaseException:
+        stop.set()  # For example Ctrl+C: the threads stop after their current request
+        raise
     finally:
+        paper_pool.shutdown(wait=False, cancel_futures=True)
+        if api_pool is not None:
+            api_pool.shutdown(wait=False, cancel_futures=True)
         client.close()
+        outcomes = [results[i] for i in sorted(results)]
         write_report(args.report, outcomes)
         if (added := update_manifest(args.manifest, papers)) and not args.resolve_only:
             print(
@@ -387,7 +490,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--email",
         help="your contact email for Unpaywall, Crossref and OpenAlex. You can also set $BIOPARSER_CONTACT_EMAIL.",
     )
-    ap.add_argument("--delay", type=float, default=1.0, help="seconds between two requests to the same host")
+    ap.add_argument(
+        "--delay",
+        type=float,
+        default=1.0,
+        help="seconds between two requests to the same web host. The scholarly APIs use their own limits.",
+    )
+    ap.add_argument(
+        "--workers",
+        type=int,
+        default=6,
+        help="the number of papers at the same time. Each host keeps its own rate limit.",
+    )
     ap.add_argument(
         "--resolve-only",
         action="store_true",
@@ -412,6 +526,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--manual",
         action="store_true",
         help="use a visible browser: you click or log in, and the code saves the file",
+    )
+    ap.add_argument(
+        "--browser-workers",
+        type=int,
+        default=3,
+        help="the number of headless browsers at the same time. The --manual pass uses one browser.",
     )
     ap.add_argument(
         "--manual-timeout",

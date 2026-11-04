@@ -1,0 +1,1034 @@
+diff --git a/README.md b/README.md
+index 50bb4d9ff9db49927b0812fcdda81aaba4922f3a..06687b8a6f6aec300a8733cf778d8a156d2fb3e6 100644
+--- a/README.md
++++ b/README.md
+@@ -60,9 +60,10 @@ The command uses these sources, in this sequence:
+ 4. With the option `--manual`: a visible browser. You click the link or log in, and the command
+    saves the PDF file. Only this option uses the library proxy of `--proxy-prefix`.
+ 
+-The command makes sure that each PDF file contains the title or the DOI of the article. It waits
+-1 second between two requests to the same host. It keeps the API answers in
+-`fine_tuning_data/.fetch_cache/`, so a second run is fast.
++The command makes sure that each PDF file contains the title or the DOI of the article. It works
++on 6 papers at the same time, and each host keeps its own rate limit. It keeps the API answers in
++`fine_tuning_data/.fetch_cache/`, so a second run is fast. For the meaning of the output and the
++speed options, refer to [The output of the command](fine_tuning_data/README.md#the-output-of-the-command).
+ 
+ **CAUTION:** Do these steps outside the network of the university. On the university network,
+ the automatic steps also download articles that are not open access. The terms of the library do
+diff --git a/fine_tuning_data/README.md b/fine_tuning_data/README.md
+index 9aac095295f0e0dce3e27e918b0f8df306321761..5f10371ef586dd16a16affcb3404f5d0a21f2df6 100644
+--- a/fine_tuning_data/README.md
++++ b/fine_tuning_data/README.md
+@@ -125,6 +125,73 @@ The command also adds rows to `manifest.tsv` for the papers with more than one T
+ Abraham 2022, Jérémy 2023, Morenikeji 2022/2023 and Wimberly 2023. Morenikeji 2022 and
+ Morenikeji 2023 have the same citation. Ask the client if they are one article.
+ 
++### The output of the command
++
++The command writes one line for each paper, for example:
++
++```
++[1/175] not_found  high   doi:crossref        pdf:-                 oa:closed  Example et al., 2020
++```
++
++| Column | Description |
++|---|---|
++| `[1/175]` | The number of the paper in this run. The papers run at the same time, so the sequence of the lines can change. |
++| `not_found` | The status of the paper |
++| `high` | The confidence of the DOI match |
++| `doi:crossref` | The service that found the DOI |
++| `pdf:unpaywall` | The source of the PDF file. The value `-` shows that there is no PDF file. |
++| `oa:closed` | The open-access status from Unpaywall or OpenAlex |
++
++The statuses:
++
++- `downloaded`: the PDF file is in `pdfs/`, and it contains the title or the DOI.
++- `exists`: the PDF file is there from an earlier run.
++- `unverified`: the command found a PDF file, but the file does not contain the title or the
++  DOI. Examine the file in `pdfs/_unverified/`.
++- `not_found`: the command found the DOI, but it did not find a PDF file.
++- `unresolved`: the command did not find a DOI that agrees with the citation.
++
++The confidence of the DOI match. The command compares the title, the year and the first author
++of each search result with the citation:
++
++- `high`: at least 90% of the title words of the result are in the citation. At least 70% of the
++  title words of the citation are in the result. The year agrees to ±1 year, and the first author
++  agrees.
++- `medium`: at least 80% and 50% of the title words agree, and the year or the first author
++  agrees. Examine these matches.
++- `low`: the command does not use the result.
++- `none`: no search result agrees with the citation.
++- `given`: the DOI comes from the citation or from `doi_overrides.tsv`.
++
++The open-access status:
++
++- `gold`, `diamond`, `hybrid` or `bronze`: the publisher gives a free copy.
++- `green`: a repository has a free copy.
++- `closed`: there is no free copy. Only part d, with EZproxy, can get the article.
++- `-`: there is no information, because there is no DOI or no answer from the APIs.
++
++A `not_found` paper with `oa:closed` is normal. The automatic parts get only free copies, and
++part d gets the other papers. A `not_found` paper with a different status has a free copy, but
++the download failed. Usually, the site blocks programs. The headless browser of part c tries
++these papers again.
++
++At the end, the command shows the number of papers for each status. It also shows how many of
++the papers that it did not find are closed access.
++
++### Speed
++
++The command works on 6 papers at the same time. To change this number, use `--workers`. Each
++host keeps its own rate limit:
++
++- The scholarly APIs: 5 requests each second or less. Semantic Scholar: 1 request each second.
++- doi.org: 5 requests each second. The publisher after the redirect keeps its own limit.
++- Each publisher and each repository: 1 new request each second. To change this time, use
++  `--delay`.
++
++The headless browser pass uses 3 browsers at the same time. To change this number, use
++`--browser-workers`. Each browser uses memory. If your computer is slow, use
++`--browser-workers 1`. The manual pass uses one browser, because you work with one window.
++
+ ### Library access with EZproxy
+ 
+ Many of the articles are not open access. The University of Helsinki pays for access to them.
+diff --git a/src/bioparser_ft/fetch/cli.py b/src/bioparser_ft/fetch/cli.py
+index f4091274f958333f13233f284d8c6085f15566f4..a832eb1dd253422e416c9e41f71201e9ea2dc5f4 100644
+--- a/src/bioparser_ft/fetch/cli.py
++++ b/src/bioparser_ft/fetch/cli.py
+@@ -11,6 +11,9 @@ Do these steps in this sequence:
+ Do these steps outside the network of the university. Only step 4 uses the library proxy
+ and your login. The library terms do not let programs download articles automatically.
+ 
++The command works on 6 papers at the same time (--workers), and the headless pass uses
++3 browsers (--browser-workers). Each host keeps its own rate limit.
++
+ A second run is fast. The cache keeps the API answers, and the code keeps the PDF files
+ from the earlier runs.
+ 
+@@ -31,10 +34,13 @@ import contextlib
+ import csv
+ import hashlib
+ import os
++import queue
+ import re
+ import tempfile
++import threading
+ from collections import Counter
+ from collections.abc import Iterator, Sequence
++from concurrent.futures import ThreadPoolExecutor, as_completed
+ from dataclasses import dataclass, field
+ from pathlib import Path
+ from urllib.parse import quote
+@@ -47,10 +53,17 @@ from .pdfcheck import PdfCheck, check_pdf, is_pdf
+ from .scholarly import Candidate, Resolution, Scholarly, make_candidate
+ 
+ REPORT_COLUMNS = (
+-    "key", "status", "confidence", "doi", "resolved_by", "pdf_source", "pdf_url", "verified",
++    "key", "status", "confidence", "oa_status", "doi", "resolved_by", "pdf_source", "pdf_url", "verified",
+     "title_recall", "pages", "bytes", "sha256", "tsv_files", "citation", "matched_title", "notes",
+ )  # fmt: skip
+ MISSING = ("not_found", "unverified", "unresolved")
++_PRINT_LOCK = threading.Lock()
++
++
++def _say(text: str) -> None:
++    """Print one message. The lock keeps the lines of different threads apart."""
++    with _PRINT_LOCK:
++        print(text, flush=True)
+ 
+ 
+ @dataclass
+@@ -68,6 +81,7 @@ class Outcome:
+     status: str = ""
+     got: Got | None = None
+     notes: list[str] = field(default_factory=list)
++    oa_status: str = ""  # From Unpaywall or OpenAlex: gold, diamond, hybrid, bronze, green or closed
+ 
+ 
+ def _better(a: Got | None, b: Got | None) -> Got | None:
+@@ -117,11 +131,12 @@ def fetch_candidate(
+ 
+ 
+ def fetch_http(
+-    client: PoliteClient, sch: Scholarly, paper: Paper, res: Resolution
++    client: PoliteClient, sch: Scholarly, paper: Paper, res: Resolution, info: dict | None = None
+ ) -> tuple[Got | None, list[str]]:
+     """Use the candidates one batch at a time, and stop at the first verified PDF.
+ 
+-    Then the code does not call the APIs of the next batches.
++    Then the code does not call the APIs of the next batches. The function writes the
++    open-access status to info["oa_status"].
+     """
+     title = res.title or paper.title
+     notes: list[str] = []
+@@ -131,7 +146,7 @@ def fetch_http(
+         if res.candidates:
+             yield sorted(res.candidates)
+         if res.doi:
+-            yield from sch.oa_candidates(res.doi)
++            yield from sch.oa_candidates(res.doi, info)
+         elif res.landing:
+             yield [c for u in res.landing if (c := make_candidate(u, "landing", kind="landing", stage=2))]
+ 
+@@ -182,17 +197,47 @@ def _landing_url(oc: Outcome, *, manual: bool, proxy_prefix: str | None) -> str
+     return None
+ 
+ 
+-def browser_pass(outcomes: list[Outcome], args: argparse.Namespace, *, manual: bool) -> None:
+-    from .browser import BrowserFetcher
+-
++def browser_pass(
++    outcomes: list[Outcome], args: argparse.Namespace, *, manual: bool, stop: threading.Event | None = None
++) -> None:
+     pending = [o for o in outcomes if o.status in MISSING]
+     if not pending:
+         return
+-    print(f"\n{'manual' if manual else 'headless browser'} pass: {len(pending)} papers")
++    # A person works with one window at a time. The headless pass can use more browsers.
++    workers = 1 if manual else max(1, min(args.browser_workers, len(pending)))
++    mode = "manual" if manual else "headless browser"
++    more = f", {workers} browsers at the same time" if workers > 1 else ""
++    _say(f"\n{mode} pass: {len(pending)} papers{more}")
+     if not manual and args.proxy_prefix:
+-        print("  The headless pass does not use --proxy-prefix. Only the --manual pass uses it.")
++        _say("  The headless pass does not use --proxy-prefix. Only the --manual pass uses it.")
++    stop = stop or threading.Event()
++    todo: queue.SimpleQueue[tuple[int, Outcome]] = queue.SimpleQueue()
++    for item in enumerate(pending, 1):
++        todo.put(item)
++    if workers == 1:
++        _browser_worker(todo, len(pending), args, manual=manual, stop=stop)
++        return
++    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="browser") as pool:
++        futures = [
++            pool.submit(_browser_worker, todo, len(pending), args, manual=False, stop=stop)
++            for _ in range(workers)
++        ]
++        try:
++            for f in futures:
++                f.result()  # An error in a browser thread comes to the main thread here
++        except BaseException:
++            stop.set()  # The other browsers stop after their current paper
++            raise
++
++
++def _browser_worker(
++    todo: queue.SimpleQueue, total: int, args: argparse.Namespace, *, manual: bool, stop: threading.Event
++) -> None:
++    """Get the papers from the queue, one at a time, with one browser. Each thread has its own browser."""
++    from .browser import BrowserFetcher
++
+     # The library terms do not let programs download articles automatically. For this reason, only the
+-    # manual pass uses the library proxy and the saved profile with your login. The headless pass
++    # manual pass uses the library proxy and the saved profile with your login. Each headless browser
+     # starts with a new, empty profile, so it has no login cookies.
+     proxy_prefix = args.proxy_prefix if manual else None
+     with contextlib.ExitStack() as stack:
+@@ -209,15 +254,19 @@ def browser_pass(outcomes: list[Outcome], args: argparse.Namespace, *, manual: b
+                 channel=args.browser_channel,
+             )
+         )
+-        for i, oc in enumerate(pending, 1):
++        while not stop.is_set():
++            try:
++                i, oc = todo.get_nowait()
++            except queue.Empty:
++                return
+             url = _landing_url(oc, manual=manual, proxy_prefix=proxy_prefix)
+             if not url:
+                 continue
+-            label = f"[{i}/{len(pending)}] {oc.paper.key}"
++            label = f"[{i}/{total}] {oc.paper.key}"
+             raw = bf.fetch_manual(url, label, args.manual_timeout) if manual else bf.fetch_auto(url)
+             if raw is None:
+                 if not manual:
+-                    print(f"{label}: the browser found no PDF")
++                    _say(f"{label}: the browser found no PDF")
+                 continue
+             data, src = raw
+             title = oc.resolution.title or oc.paper.title
+@@ -227,7 +276,7 @@ def browser_pass(outcomes: list[Outcome], args: argparse.Namespace, *, manual: b
+                 Got(data, src, "manual" if manual else "browser", check_pdf(data, title, oc.resolution.doi)),
+                 args.out_dir,
+             )
+-            print(f"{label}: {before} -> {oc.status}")
++            _say(f"{label}: {before} -> {oc.status}")
+ 
+ 
+ # ------------------------------------------------------------------------ results
+@@ -251,7 +300,8 @@ def write_report(path: Path, outcomes: list[Outcome]) -> None:
+             continue
+         r, g = oc.resolution, oc.got
+         rows.append({
+-            "key": oc.paper.key, "status": oc.status, "confidence": r.confidence, "doi": r.doi or "",
++            "key": oc.paper.key, "status": oc.status, "confidence": r.confidence,
++            "oa_status": oc.oa_status, "doi": r.doi or "",
+             "resolved_by": r.source, "pdf_source": g.source if g else "", "pdf_url": g.url if g else "",
+             "verified": ("yes" if g.check.verified else "no") if g else "",
+             "title_recall": f"{g.check.title_recall:.2f}" if g and g.check.title_recall is not None else "",
+@@ -301,9 +351,17 @@ def summarise(outcomes: list[Outcome], report: Path) -> None:
+     if by_source:
+         print("downloaded from: " + ", ".join(f"{k} {v}" for k, v in by_source.most_common()))
+     missing = [o for o in outcomes if o.status in MISSING]
++    if missing:
++        closed = sum(o.oa_status == "closed" for o in missing)
++        free = sum(o.oa_status not in ("", "closed") for o in missing)
++        print(
++            f"not found: {closed} closed access (only --manual with --proxy-prefix can get them), "
++            f"{free} open access (a free copy exists, but the download failed), "
++            f"{len(missing) - closed - free} unknown (no DOI, or no answer from Unpaywall and OpenAlex)"
++        )
+     for o in missing[:20]:
+         where = f"https://doi.org/{o.resolution.doi}" if o.resolution.doi else "no DOI found"
+-        print(f"  {o.status:10} {o.paper.key[:55]:55} {where}")
++        print(f"  {o.status:10} oa:{o.oa_status or '-':7} {o.paper.key[:55]:55} {where}")
+     if len(missing) > 20:
+         print(f"  ... and {len(missing) - 20} more")
+     print(f"report: {report}")
+@@ -315,6 +373,55 @@ def summarise(outcomes: list[Outcome], report: Path) -> None:
+ 
+ 
+ # ------------------------------------------------------------------------ main
++def process_paper(paper: Paper, client: PoliteClient, sch: Scholarly, args: argparse.Namespace) -> Outcome:
++    """Find the DOI and an open-access PDF file for one paper. The threads of the pool call this function."""
++    target = args.out_dir / paper.pdf_name
++    if target.exists() and not args.refresh:
++        with target.open("rb") as fh:
++            if is_pdf(fh.read(1024)):
++                return Outcome(paper, Resolution(), "exists")
++    res = sch.resolve(paper)
++    oc = Outcome(paper, res, notes=paper.notes + res.notes)
++    if res.confidence == "medium":
++        oc.notes.append(f"medium-confidence match: examine '{res.title[:80]}'")
++    if not (res.doi or res.candidates or res.landing) or (
++        args.min_confidence == "high" and res.confidence == "medium"
++    ):
++        oc.status = "unresolved"
++    elif args.resolve_only:
++        oc.status = "resolved"
++    else:
++        info: dict = {}
++        got, notes = fetch_http(client, sch, paper, res, info)
++        oc.oa_status = info.get("oa_status", "")
++        oc.notes += notes[-8:]
++        _apply(oc, got, args.out_dir)
++    return oc
++
++
++def _process_safely(
++    paper: Paper, client: PoliteClient, sch: Scholarly, args: argparse.Namespace, stop: threading.Event
++) -> Outcome | None:
++    if stop.is_set():
++        return None
++    try:
++        return process_paper(paper, client, sch, args)
++    except Exception as exc:  # An error in one paper must not stop the full run
++        return Outcome(paper, Resolution(), "not_found", notes=[f"error: {exc!r}"])
++
++
++def _progress(done: int, total: int, oc: Outcome) -> None:
++    if oc.status == "exists":
++        _say(f"[{done}/{total}] exists     {oc.paper.key[:60]} (the PDF file is there from an earlier run)")
++        return
++    r = oc.resolution
++    pdf = oc.got.source if oc.got else "-"
++    _say(
++        f"[{done}/{total}] {oc.status:10} {r.confidence:6} doi:{r.source or '-':15} "
++        f"pdf:{pdf:17} oa:{oc.oa_status or '-':7} {oc.paper.key[:60]}"
++    )
++
++
+ def run(args: argparse.Namespace, client: PoliteClient | None = None) -> list[Outcome]:
+     """Run the full procedure. The tests give a `client` with an httpx.MockTransport."""
+     papers = group_papers(args.tsv_dir, args.overrides)
+@@ -329,42 +436,38 @@ def run(args: argparse.Namespace, client: PoliteClient | None = None) -> list[Ou
+         )
+     if client is None:
+         client = PoliteClient(email=email, cache_dir=args.cache_dir, delay=args.delay, refresh=args.refresh)
+-    sch = Scholarly(client, email=email)
+-    outcomes: list[Outcome] = []
++    workers = max(1, args.workers)
++    # The paper threads wait for the API threads. For this reason, they use two different pools:
++    # one pool cannot wait for itself (no deadlock).
++    paper_pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="paper")
++    api_pool = ThreadPoolExecutor(max_workers=3 * workers, thread_name_prefix="api") if workers > 1 else None
++    sch = Scholarly(client, email=email, pool=api_pool)
++    stop = threading.Event()
++    results: dict[int, Outcome] = {}
+     try:
+-        for i, paper in enumerate(papers, 1):
+-            target = args.out_dir / paper.pdf_name
+-            if target.exists() and not args.refresh:
+-                with target.open("rb") as fh:
+-                    if is_pdf(fh.read(1024)):
+-                        outcomes.append(Outcome(paper, Resolution(), "exists"))
+-                        continue
+-            res = sch.resolve(paper)
+-            oc = Outcome(paper, res, notes=paper.notes + res.notes)
+-            if res.confidence == "medium":
+-                oc.notes.append(f"medium-confidence match: examine '{res.title[:80]}'")
+-            if not (res.doi or res.candidates or res.landing) or (
+-                args.min_confidence == "high" and res.confidence == "medium"
+-            ):
+-                oc.status = "unresolved"
+-            elif args.resolve_only:
+-                oc.status = "resolved"
+-            else:
+-                got, notes = fetch_http(client, sch, paper, res)
+-                oc.notes += notes[-8:]
+-                _apply(oc, got, args.out_dir)
+-            outcomes.append(oc)
+-            src = oc.got.source if oc.got else res.source or "-"
+-            print(
+-                f"[{i}/{len(papers)}] {oc.status:10} {res.confidence:6} {src:15} {paper.key[:60]}", flush=True
+-            )
++        futures = {
++            paper_pool.submit(_process_safely, paper, client, sch, args, stop): i
++            for i, paper in enumerate(papers)
++        }
++        for done, fut in enumerate(as_completed(futures), 1):
++            if (oc := fut.result()) is not None:
++                results[futures[fut]] = oc
++                _progress(done, len(papers), oc)
++        outcomes = [results[i] for i in sorted(results)]  # The sequence of the TSV files
+         if not args.resolve_only:
+             if args.browser:
+-                browser_pass(outcomes, args, manual=False)
++                browser_pass(outcomes, args, manual=False, stop=stop)
+             if args.manual:
+-                browser_pass(outcomes, args, manual=True)
++                browser_pass(outcomes, args, manual=True, stop=stop)
++    except BaseException:
++        stop.set()  # For example Ctrl+C: the threads stop after their current request
++        raise
+     finally:
++        paper_pool.shutdown(wait=False, cancel_futures=True)
++        if api_pool is not None:
++            api_pool.shutdown(wait=False, cancel_futures=True)
+         client.close()
++        outcomes = [results[i] for i in sorted(results)]
+         write_report(args.report, outcomes)
+         if (added := update_manifest(args.manifest, papers)) and not args.resolve_only:
+             print(
+@@ -387,7 +490,18 @@ def build_parser() -> argparse.ArgumentParser:
+         "--email",
+         help="your contact email for Unpaywall, Crossref and OpenAlex. You can also set $BIOPARSER_CONTACT_EMAIL.",
+     )
+-    ap.add_argument("--delay", type=float, default=1.0, help="seconds between two requests to the same host")
++    ap.add_argument(
++        "--delay",
++        type=float,
++        default=1.0,
++        help="seconds between two requests to the same web host. The scholarly APIs use their own limits.",
++    )
++    ap.add_argument(
++        "--workers",
++        type=int,
++        default=6,
++        help="the number of papers at the same time. Each host keeps its own rate limit.",
++    )
+     ap.add_argument(
+         "--resolve-only",
+         action="store_true",
+@@ -413,6 +527,12 @@ def build_parser() -> argparse.ArgumentParser:
+         action="store_true",
+         help="use a visible browser: you click or log in, and the code saves the file",
+     )
++    ap.add_argument(
++        "--browser-workers",
++        type=int,
++        default=3,
++        help="the number of headless browsers at the same time. The --manual pass uses one browser.",
++    )
+     ap.add_argument(
+         "--manual-timeout",
+         type=float,
+diff --git a/src/bioparser_ft/fetch/net.py b/src/bioparser_ft/fetch/net.py
+index 340ee1c244a8c048b13770f5d4d9289757c4039e..ec42fc50460068279a9ddf96551a1701db178b10 100644
+--- a/src/bioparser_ft/fetch/net.py
++++ b/src/bioparser_ft/fetch/net.py
+@@ -1,6 +1,7 @@
+ """This module does polite HTTP requests. It has these functions:
+ 
+-- a rate limit for each host
++- a rate limit for each host, also when many threads send requests at the same time
++- a limit for the number of open requests to each host
+ - a new request after a temporary error
+ - a cache on the disk for the API answers
+ - a size limit for downloads
+@@ -8,9 +9,14 @@
+ 
+ from __future__ import annotations
+ 
++import contextlib
+ import hashlib
+ import json
++import os
++import re
++import threading
+ import time
++from collections.abc import Callable
+ from dataclasses import dataclass
+ from pathlib import Path
+ from typing import Any
+@@ -32,6 +38,27 @@ WEB_HEADERS = {
+ }
+ RETRY_STATUS = {429, 500, 502, 503, 504}
+ MAX_PDF_BYTES = 150 * 1024 * 1024
++# The minimum time in seconds between the starts of two requests to one host. The API values are
++# below the published limits of the services. All other hosts (the publishers and the
++# repositories) use the `delay` value, 1 second by default.
++HOST_DELAYS = {
++    "api.crossref.org": 0.2,
++    "api.openalex.org": 0.2,
++    "api.unpaywall.org": 0.2,
++    "www.ebi.ac.uk": 0.2,
++    "api.datacite.org": 0.2,
++    "api.semanticscholar.org": 1.1,  # The shared pool of Semantic Scholar gives 1 request each second
++    "api.core.ac.uk": 1.0,
++    # doi.org only sends redirects. The publisher after the redirect has its own rate limit.
++    "doi.org": 0.2,
++    "dx.doi.org": 0.2,
++}
++RESOLVERS = {"doi.org", "dx.doi.org"}
++MAX_PER_HOST = 2  # The maximum number of open requests to the first host of a URL at the same time
++
++
++def host_of(url: httpx.URL) -> str:
++    return url.host if url.port is None else f"{url.host}:{url.port}"
+ 
+ 
+ @dataclass
+@@ -43,58 +70,107 @@ class Fetched:
+ 
+ 
+ class PoliteClient:
++    """An HTTP client for many threads. All threads share the rate limits, the cache and the cookies."""
++
+     def __init__(
+         self,
+         *,
+         email: str | None = None,
+         cache_dir: Path | None = None,
+         delay: float = 1.0,
+-        timeout: float = 60.0,
++        timeout: float = 30.0,
+         refresh: bool = False,
+         transport: httpx.BaseTransport | None = None,
+-        sleep=time.sleep,
++        sleep: Callable[[float], None] = time.sleep,
++        max_per_host: int = MAX_PER_HOST,
+     ):
+         self.email = email
+         self.cache_dir = cache_dir
+         self.delay = delay
+         self.refresh = refresh
++        self.max_per_host = max_per_host
+         self._sleep = sleep
+-        self._last: dict[str, float] = {}
++        self._lock = threading.Lock()
++        self._next: dict[str, float] = {}  # The earliest start time of the next request to each host
++        self._server_delay: dict[str, float] = {}  # From the rate-limit headers of the server
++        self._slots: dict[str, threading.BoundedSemaphore] = {}
+         ua = f"bioparser-ft-fetch/{__version__}" + (f" (mailto:{email})" if email else "")
+         self.api_headers = {"User-Agent": ua, "Accept": "application/json"}
+-        # One client has one cookie jar. For this reason, the PDF request sends the cookies of the landing page.
++        # One client has one cookie jar. For this reason, the PDF request sends the cookies of the
++        # landing page. The connection pool and the cookie jar of httpx have locks for threads.
+         self.http = httpx.Client(
+             follow_redirects=True,
+             max_redirects=10,
+-            timeout=httpx.Timeout(timeout, connect=20.0),
++            timeout=httpx.Timeout(timeout, connect=10.0),
+             transport=transport,
++            # The hook runs before each request and before each redirect. For this reason, the rate
++            # limit of a publisher also applies to the requests that come through doi.org.
++            event_hooks={"request": [self._before_request]},
+         )
+ 
+     def close(self) -> None:
+         self.http.close()
+ 
+-    # ------------------------------------------------------------------ internal functions
+-    def _throttle(self, url: str) -> None:
+-        host = urlsplit(url).netloc
+-        wait = self._last.get(host, 0.0) + self.delay - time.monotonic()
+-        if wait > 0:
+-            self._sleep(wait)
+-        self._last[host] = time.monotonic()
++    # ------------------------------------------------------------------ rate limits
++    def delay_for(self, host: str) -> float:
++        base = min(HOST_DELAYS[host], self.delay) if host in HOST_DELAYS else self.delay
++        return max(base, self._server_delay.get(host, 0.0))
++
++    def _before_request(self, request: httpx.Request) -> None:
++        self._throttle(host_of(request.url))
+ 
++    def _throttle(self, host: str) -> None:
++        """Wait for the next free start time of the host.
++
++        Each thread reserves its own start time. For this reason, two threads do not start
++        requests to one host at the same moment.
++        """
++        with self._lock:
++            now = time.monotonic()
++            start = max(now, self._next.get(host, 0.0))
++            self._next[host] = start + self.delay_for(host)
++        if start > now:
++            self._sleep(start - now)
++
++    def _pause_host(self, host: str, seconds: float) -> None:
++        """Stop all requests to the host for some seconds, for example after an HTTP 429 answer."""
++        with self._lock:
++            self._next[host] = max(self._next.get(host, 0.0), time.monotonic() + seconds)
++
++    def _slot(self, host: str) -> contextlib.AbstractContextManager:
++        if host in RESOLVERS:
++            return contextlib.nullcontext()  # A redirect is fast: the publisher limits the open requests
++        with self._lock:
++            if host not in self._slots:
++                self._slots[host] = threading.BoundedSemaphore(self.max_per_host)
++            return self._slots[host]
++
++    def _note_rate_limit(self, host: str, headers: httpx.Headers) -> None:
++        """Obey the rate limit that the server gives, for example Crossref: 50 requests in 1 second."""
++        limit = headers.get("x-rate-limit-limit", "").strip()
++        interval = re.fullmatch(r"(\d+(?:\.\d+)?)s?", headers.get("x-rate-limit-interval", "").strip())
++        if limit.isdigit() and int(limit) > 0 and interval:
++            with self._lock:
++                self._server_delay[host] = float(interval.group(1)) / int(limit)
++
++    # ------------------------------------------------------------------ internal functions
+     def _request(self, url: str, *, params=None, headers=None, attempts: int = 3) -> httpx.Response | None:
++        host = host_of(httpx.URL(url))
+         for attempt in range(attempts):
+-            self._throttle(url)
+             try:
+-                resp = self.http.get(url, params=params, headers=headers)
++                with self._slot(host):  # The request hook does the rate limit
++                    resp = self.http.get(url, params=params, headers=headers)
+             except httpx.HTTPError:
+                 if attempt == attempts - 1:
+                     return None
+                 self._sleep(2 ** (attempt + 1))
+                 continue
++            final = host_of(resp.url)  # The host after the redirects
++            self._note_rate_limit(final, resp.headers)
+             if resp.status_code in RETRY_STATUS and attempt < attempts - 1:
+                 retry_after = resp.headers.get("Retry-After", "")
+                 wait = float(retry_after) if retry_after.isdigit() else 2 ** (attempt + 1)
+-                self._sleep(min(wait, 60.0))
++                self._pause_host(final, min(wait, 60.0))  # All threads wait, not only this thread
+                 continue
+             return resp
+         return None
+@@ -115,8 +191,10 @@ class PoliteClient:
+         """
+         path = self._cache_path(url, params)
+         if path and path.exists() and not self.refresh:
+-            cached = json.loads(path.read_text(encoding="utf-8"))
+-            return cached["data"]
++            try:
++                return json.loads(path.read_text(encoding="utf-8"))["data"]
++            except (OSError, ValueError, KeyError):
++                pass  # A damaged cache file: send the request again
+         resp = self._request(url, params=params, headers={**self.api_headers, **(headers or {})})
+         if resp is None or resp.status_code not in (200, 404):
+             return None  # A temporary problem: do not keep it in the cache
+@@ -128,7 +206,9 @@ class PoliteClient:
+                 return None
+         if path:
+             path.parent.mkdir(parents=True, exist_ok=True)
+-            path.write_text(json.dumps({"url": str(resp.url), "data": data}), encoding="utf-8")
++            tmp = path.with_name(f"{path.name}.{os.getpid()}-{threading.get_ident()}.tmp")
++            tmp.write_text(json.dumps({"url": str(resp.url), "data": data}), encoding="utf-8")
++            tmp.replace(path)  # An atomic write: other threads read the old file or the new file
+         return data
+ 
+     def get_web(
+@@ -140,13 +220,14 @@ class PoliteClient:
+         """
+         if urlsplit(url).scheme not in ("http", "https"):
+             return None
++        host = host_of(httpx.URL(url))
+         headers = dict(WEB_HEADERS)
+         if referer:
+             headers["Referer"] = referer
+         for attempt in range(2):
+-            self._throttle(url)
+             try:
+-                with self.http.stream("GET", url, headers=headers) as resp:
++                # The request hook does the rate limit of each host, also after a redirect
++                with self._slot(host), self.http.stream("GET", url, headers=headers) as resp:
+                     chunks, size = [], 0
+                     for chunk in resp.iter_bytes():
+                         size += len(chunk)
+diff --git a/src/bioparser_ft/fetch/scholarly.py b/src/bioparser_ft/fetch/scholarly.py
+index 56a84390a1c31b7e53f0e2cf0a45e6a426ff1d52..bff5c50707262008c74e4a534aac6034b6aa0944 100644
+--- a/src/bioparser_ft/fetch/scholarly.py
++++ b/src/bioparser_ft/fetch/scholarly.py
+@@ -7,7 +7,8 @@ DataCite and CORE.
+ from __future__ import annotations
+ 
+ import os
+-from collections.abc import Iterator
++from collections.abc import Callable, Iterator
++from concurrent.futures import Executor
+ from dataclasses import dataclass, field
+ from typing import Any
+ from urllib.parse import quote
+@@ -80,9 +81,10 @@ def _first(xs: Any) -> str:
+ 
+ 
+ class Scholarly:
+-    def __init__(self, client: PoliteClient, *, email: str | None = None):
++    def __init__(self, client: PoliteClient, *, email: str | None = None, pool: Executor | None = None):
+         self.c = client
+         self.email = email
++        self.pool = pool  # With a thread pool, the API calls of one stage go out at the same time
+         self.s2_key = os.environ.get("S2_API_KEY")
+         self.core_key = os.environ.get("CORE_API_KEY")
+         self.openalex_key = os.environ.get("OPENALEX_API_KEY")
+@@ -95,6 +97,16 @@ class Scholarly:
+             params["api_key"] = self.openalex_key
+         return params | self._mailto()
+ 
++    def _parallel(self, *calls: Callable[[], Any]) -> list[Any]:
++        """Do the calls at the same time, and return the results in the sequence of the calls.
++
++        The calls go to different hosts. The client keeps the rate limit of each host.
++        """
++        if self.pool is None:
++            return [call() for call in calls]
++        futures = [self.pool.submit(call) for call in calls]
++        return [f.result() for f in futures]
++
+     def _check(self, paper: Paper, title: str, year: int | None, authors: list[str]) -> Verdict:
+         return verify(paper.citation, paper.title, paper.first_author, paper.year, title, year, authors)
+ 
+@@ -298,23 +310,32 @@ class Scholarly:
+                 landing.append(loc["landing_page_url"])
+         return cands, landing
+ 
+-    def oa_candidates(self, doi: str) -> Iterator[list[Candidate]]:
++    def oa_candidates(self, doi: str, info: dict | None = None) -> Iterator[list[Candidate]]:
+         """Yield the candidates in batches, with the best sources first.
+ 
+         When a batch gives a good PDF, the caller stops. Then the code does not call the other APIs.
++        The function writes the open-access status of Unpaywall or OpenAlex to info["oa_status"]:
++        gold, diamond, hybrid, bronze, green or closed.
+         """
++        info = {} if info is None else info
+         landing: list[str] = []
++        qdoi = quote(doi, safe="/")
+         # Stage 0: Unpaywall and OpenAlex. They are the largest open-access indexes and they give the version.
++        u, w = self._parallel(
++            # Unpaywall operates only with a contact email
++            lambda: self.c.get_json(UNPAYWALL + qdoi, {"email": self.email}) if self.email else None,
++            lambda: self.c.get_json(f"{OPENALEX}/doi:{qdoi}", self._openalex_params()),
++        )
+         batch: list[Candidate] = []
+-        if self.email:  # Unpaywall operates only with a contact email
+-            u = self.c.get_json(UNPAYWALL + quote(doi, safe="/"), {"email": self.email})
+-            for loc in [(u or {}).get("best_oa_location"), *((u or {}).get("oa_locations") or [])]:
+-                if not loc:
+-                    continue
+-                if c := make_candidate(loc.get("url_for_pdf"), "unpaywall", version=loc.get("version") or ""):
+-                    batch.append(c)
+-                landing += [x for x in (loc.get("url_for_landing_page"), loc.get("url")) if x]
+-        w = self.c.get_json(f"{OPENALEX}/doi:{quote(doi, safe='/')}", self._openalex_params())
++        for loc in [(u or {}).get("best_oa_location"), *((u or {}).get("oa_locations") or [])]:
++            if not loc:
++                continue
++            if c := make_candidate(loc.get("url_for_pdf"), "unpaywall", version=loc.get("version") or ""):
++                batch.append(c)
++            landing += [x for x in (loc.get("url_for_landing_page"), loc.get("url")) if x]
++        info["oa_status"] = (
++            (u or {}).get("oa_status") or ((w or {}).get("open_access") or {}).get("oa_status") or ""
++        )
+         if w:
+             c2, l2 = self._openalex_locations(w)
+             batch += c2
+@@ -325,10 +346,15 @@ class Scholarly:
+         yield sorted(batch)
+ 
+         # Stage 1: Europe PMC for PMC copies, Semantic Scholar, and the full-text links in Crossref.
+-        batch = []
+-        e = self.c.get_json(
+-            EUROPEPMC, {"query": f'DOI:"{doi}"', "format": "json", "resultType": "core", "pageSize": 1}
++        headers = {"x-api-key": self.s2_key} if self.s2_key else None
++        e, s, cr = self._parallel(
++            lambda: self.c.get_json(
++                EUROPEPMC, {"query": f'DOI:"{doi}"', "format": "json", "resultType": "core", "pageSize": 1}
++            ),
++            lambda: self.c.get_json(S2 + f"DOI:{qdoi}", {"fields": "openAccessPdf"}, headers),
++            lambda: self.c.get_json(f"{CROSSREF}/{qdoi}", self._mailto()),
+         )
++        batch = []
+         for r in ((e or {}).get("resultList") or {}).get("result", [])[:1]:
+             pmcid = pmcid or r.get("pmcid") or ""
+             for f in (r.get("fullTextUrlList") or {}).get("fullTextUrl") or []:
+@@ -345,12 +371,9 @@ class Scholarly:
+             batch.append(
+                 make_candidate(f"https://europepmc.org/articles/{pmcid}?pdf=render", "europepmc", stage=1)
+             )
+-        headers = {"x-api-key": self.s2_key} if self.s2_key else None
+-        s = self.c.get_json(S2 + f"DOI:{quote(doi, safe='/')}", {"fields": "openAccessPdf"}, headers)
+         batch.append(
+             make_candidate(((s or {}).get("openAccessPdf") or {}).get("url"), "semanticscholar", stage=1)
+         )
+-        cr = self.c.get_json(f"{CROSSREF}/{quote(doi, safe='/')}", self._mailto())
+         item = (cr or {}).get("message") or {}
+         for link in item.get("link") or []:
+             if link.get("content-type") == "application/pdf":
+diff --git a/tests/test_fetch.py b/tests/test_fetch.py
+index d0d69c7f4146f2dbcfe0a0495c2deb3b781f8e96..bd53929646096e5f1b2362d243a74e28c494670d 100644
+--- a/tests/test_fetch.py
++++ b/tests/test_fetch.py
+@@ -8,9 +8,12 @@ and a Chromium binary are available (BIOPARSER_CHROMIUM=/path/to/chrome).
+ from __future__ import annotations
+ 
+ import csv
++import itertools
+ import json
+ import os
+ import threading
++import time
++from concurrent.futures import ThreadPoolExecutor
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+ from pathlib import Path
+ from typing import ClassVar
+@@ -189,7 +192,9 @@ def fake_web(request: httpx.Request) -> httpx.Response:
+     if host == "api.unpaywall.org":
+         if path.endswith("10.1000/a"):
+             loc = {"url_for_pdf": "https://repo.example.org/a.pdf", "version": "publishedVersion"}
+-            return httpx.Response(200, json={"best_oa_location": loc, "oa_locations": [loc]})
++            return httpx.Response(
++                200, json={"best_oa_location": loc, "oa_locations": [loc], "oa_status": "green"}
++            )
+         return httpx.Response(404, json={"error": True})
+     if host == "doi.org" and path == "/10.1000/b":
+         html = '<html><head><meta name="citation_pdf_url" content="https://publisher.example.com/b.pdf"></head></html>'
+@@ -256,6 +261,7 @@ def test_fetch_end_to_end(tmp_path: Path):
+     # The citation_pdf_url on the landing page of the DOI
+     assert outcomes["Smith, 2021"].got.source == "landing"
+     assert outcomes["Nobody, 2019"].status == "unresolved"  # The code refuses the incorrect Crossref result
++    assert outcomes["Doe and Roe, 2020"].oa_status == "green"
+     assert (out / "Doe and Roe, 2020.pdf").read_bytes().startswith(b"%PDF-")
+     assert not any(
+         "repo.example.org" in c for c in calls[calls.index("https://repo.example.org/a.pdf") + 1 :]
+@@ -269,6 +275,7 @@ def test_fetch_end_to_end(tmp_path: Path):
+         report["Doe and Roe, 2020"]["doi"] == "10.1000/a" and report["Doe and Roe, 2020"]["verified"] == "yes"
+     )
+     assert len(report["Smith, 2021"]["sha256"]) == 64
++    assert report["Doe and Roe, 2020"]["oa_status"] == "green"
+ 
+     calls.clear()  # Second run: the PDF files are there and the cache has the API answers, so there is no network traffic
+     again = {o.paper.key: o.status for o in run(args, client=_client(tmp_path, calls))}
+@@ -510,3 +517,203 @@ def test_oa_candidates_parses_every_source(tmp_path: Path):
+         and "https://pub.example/tdm/x.xml" not in stage1
+     )
+     assert [u for _, u in stages[2]] == ["https://doi.org/10.1000/x", "https://pub.example/x"]
++
++
++# ----------------------------------------------------------------------- concurrency
++def _args(tmp_path: Path, tsv: Path, *extra: str):
++    return build_parser().parse_args([
++        "--tsv-dir", str(tsv), "--out-dir", str(tmp_path / "pdfs"), "--report", str(tmp_path / "report.tsv"),
++        "--manifest", str(tmp_path / "manifest.tsv"), "--overrides", str(tmp_path / "none.tsv"),
++        "--email", "test@example.org", *extra,
++    ])  # fmt: skip
++
++
++@pytest.mark.parametrize("workers", ["1", "4"])
++def test_workers_give_the_same_results(tmp_path: Path, workers: str):
++    """The papers run at the same time, but the results and the report sequence do not change."""
++    tsv = _setup(tmp_path)
++    outcomes = run(_args(tmp_path, tsv, "--workers", workers), client=_client(tmp_path, []))
++    assert [(o.paper.key, o.status) for o in outcomes] == [
++        ("Doe and Roe, 2020", "downloaded"),
++        ("Nobody, 2019", "unresolved"),
++        ("Smith, 2021", "downloaded"),
++    ]
++    with (tmp_path / "report.tsv").open(encoding="utf-8") as fh:
++        assert [r["key"] for r in csv.DictReader(fh, delimiter="\t")] == [o.paper.key for o in outcomes]
++
++
++def test_error_in_one_paper_does_not_stop_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
++    from bioparser_ft.fetch import cli
++
++    real = cli.fetch_http
++
++    def fetch_http(client, sch, paper, res, info=None):
++        if paper.key.startswith("Smith"):
++            raise RuntimeError("broken PDF parser")
++        return real(client, sch, paper, res, info)
++
++    monkeypatch.setattr(cli, "fetch_http", fetch_http)
++    tsv = _setup(tmp_path)
++    outcomes = {o.paper.key: o for o in run(_args(tmp_path, tsv), client=_client(tmp_path, []))}
++    assert outcomes["Doe and Roe, 2020"].status == "downloaded"
++    assert outcomes["Smith, 2021"].status == "not_found"
++    assert "broken PDF parser" in outcomes["Smith, 2021"].notes[0]
++
++
++def test_threads_share_the_rate_limit_of_a_host():
++    """Two requests to one host start 0.1 s apart or more. Two different hosts do not wait for each other."""
++    starts: dict[str, list[float]] = {}
++    lock = threading.Lock()
++
++    def handler(request: httpx.Request) -> httpx.Response:
++        with lock:
++            starts.setdefault(request.url.host, []).append(time.monotonic())
++        return httpx.Response(200, json={})
++
++    client = PoliteClient(delay=0.1, transport=httpx.MockTransport(handler))
++    urls = [f"https://{host}/{i}" for host in ("a.example", "b.example") for i in range(4)]
++    with ThreadPoolExecutor(max_workers=8) as pool:
++        assert list(pool.map(client.get_json, urls)) == [{}] * 8
++    for host in ("a.example", "b.example"):
++        t = sorted(starts[host])
++        assert all(later - earlier >= 0.09 for earlier, later in itertools.pairwise(t))
++    assert abs(min(starts["a.example"]) - min(starts["b.example"])) < 0.15
++
++
++def test_server_rate_limit_and_retry_after():
++    calls: list[str] = []
++
++    def handler(request: httpx.Request) -> httpx.Response:
++        calls.append(request.url.path)
++        if request.url.path == "/busy" and calls.count("/busy") == 1:
++            return httpx.Response(429, headers={"Retry-After": "7"})
++        return httpx.Response(
++            200, json={}, headers={"X-Rate-Limit-Limit": "2", "X-Rate-Limit-Interval": "1s"}
++        )
++
++    slept: list[float] = []
++    client = PoliteClient(delay=0.0, transport=httpx.MockTransport(handler), sleep=slept.append)
++    assert client.get_json("https://api.crossref.org/works/10.1000/x") == {}
++    assert client.delay_for("api.crossref.org") == 0.5  # The server gives 2 requests in 1 second
++    assert client.get_json("https://slow.example/busy") == {}
++    assert calls.count("/busy") == 2 and max(slept) > 6  # The client waited for the Retry-After time
++
++
++def test_oa_candidates_parallel_stages_are_equal(tmp_path: Path):
++    """With a thread pool, the API calls of one stage go out at the same time. The batches do not change."""
++    from bioparser_ft.fetch.scholarly import Scholarly
++
++    def handler(request: httpx.Request) -> httpx.Response:
++        host = request.url.host
++        if host == "api.unpaywall.org":
++            loc = {"url_for_pdf": "https://repo.example/x.pdf", "version": "acceptedVersion"}
++            return httpx.Response(200, json={"best_oa_location": loc, "oa_status": "green"})
++        if host == "api.openalex.org":
++            return httpx.Response(200, json={"best_oa_location": {"pdf_url": "https://pub.example/x.pdf"}})
++        if host == "api.semanticscholar.org":
++            return httpx.Response(200, json={"openAccessPdf": {"url": "https://s2.example/x.pdf"}})
++        return httpx.Response(404)
++
++    def stages(pool):
++        client = PoliteClient(
++            email="t@example.org", delay=0, transport=httpx.MockTransport(handler), sleep=lambda s: None
++        )
++        info: dict = {}
++        sch = Scholarly(client, email="t@example.org", pool=pool)
++        batches = [[(c.source, c.url) for c in b] for b in sch.oa_candidates("10.1000/x", info)]
++        return batches, info["oa_status"]
++
++    with ThreadPoolExecutor(max_workers=3) as pool:
++        assert stages(pool) == stages(None)
++    assert stages(None)[1] == "green"
++
++
++def test_headless_pass_uses_parallel_browsers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
++    """Each headless browser has its own thread and its own empty profile."""
++    from bioparser_ft.fetch import browser
++    from bioparser_ft.fetch.citations import Paper
++    from bioparser_ft.fetch.cli import Outcome, browser_pass
++    from bioparser_ft.fetch.scholarly import Resolution
++
++    seen: set[tuple[int, Path]] = set()
++    lock = threading.Lock()
++
++    class FakeBrowser:
++        def __init__(self, *, profile_dir: Path, headless: bool, **kwargs):
++            self.profile_dir = profile_dir
++
++        def __enter__(self):
++            return self
++
++        def __exit__(self, *exc):
++            return None
++
++        def fetch_auto(self, url: str):
++            with lock:
++                seen.add((threading.get_ident(), self.profile_dir))
++            time.sleep(0.05)  # The other threads take the next papers in this time
++
++    monkeypatch.setattr(browser, "BrowserFetcher", FakeBrowser)
++    args = build_parser().parse_args(["--browser-workers", "3", "--browser-profile", str(tmp_path / "p")])
++    outcomes = [
++        Outcome(
++            Paper(f"P{i}, 2020", "c", [f"ETS_P{i}, 2020.tsv"]), Resolution(doi=f"10.1000/{i}"), "not_found"
++        )
++        for i in range(9)
++    ]
++    browser_pass(outcomes, args, manual=False)
++    assert len({t for t, _ in seen}) == 3 and len({p for _, p in seen}) == 3
++    assert tmp_path / "p" not in {p for _, p in seen}  # No headless browser uses the saved profile
++
++
++@pytest.mark.skipif(not CHROMIUM, reason="set BIOPARSER_CHROMIUM to a Chromium/Chrome binary")
++def test_parallel_headless_pass_with_chromium(tmp_path: Path):
++    """Two real browsers, each in its own thread with its own Playwright, get four PDF files."""
++    pytest.importorskip("playwright")
++    from bioparser_ft.fetch.citations import Paper
++    from bioparser_ft.fetch.cli import Outcome, browser_pass
++    from bioparser_ft.fetch.scholarly import Resolution
++
++    server = ThreadingHTTPServer(("127.0.0.1", 0), _Site)
++    threading.Thread(target=server.serve_forever, daemon=True).start()
++    base = f"http://127.0.0.1:{server.server_port}"
++    title = "Echolocation calls of cave bats"
++    try:
++        args = build_parser().parse_args([
++            "--browser-workers", "2", "--browser-executable", CHROMIUM,
++            "--out-dir", str(tmp_path / "pdfs"), "--browser-profile", str(tmp_path / "profile"),
++        ])  # fmt: skip
++        outcomes = [
++            Outcome(Paper(f"Bat {i}, 2020", "c", [f"ETS_Bat {i}, 2020.tsv"], url=f"{base}{page}"),
++                    Resolution(title=title), "not_found")
++            for i, page in enumerate(["/landing.html", "/js.html", "/meta.html", "/landing.html"])
++        ]  # fmt: skip
++        browser_pass(outcomes, args, manual=False)
++    finally:
++        server.shutdown()
++    assert [o.status for o in outcomes] == ["downloaded"] * 4
++    assert sorted(p.name for p in (tmp_path / "pdfs").glob("*.pdf")) == [
++        f"Bat {i}, 2020.pdf" for i in range(4)
++    ]
++    assert not (tmp_path / "profile").exists()
++
++
++def test_rate_limit_applies_to_each_redirect_hop():
++    """doi.org only sends redirects. The publisher after the redirect keeps its own rate limit."""
++    starts: dict[str, list[float]] = {}
++    lock = threading.Lock()
++
++    def handler(request: httpx.Request) -> httpx.Response:
++        with lock:
++            starts.setdefault(request.url.host, []).append(time.monotonic())
++        if request.url.host == "doi.org":
++            return httpx.Response(302, headers={"Location": f"https://pub.example{request.url.path}"})
++        return httpx.Response(200, html="<html>landing page</html>")
++
++    client = PoliteClient(delay=0.3, transport=httpx.MockTransport(handler))
++    with ThreadPoolExecutor(max_workers=3) as pool:
++        pages = list(pool.map(client.get_web, [f"https://doi.org/10.1000/{i}" for i in range(3)]))
++    assert [p.url for p in pages] == [f"https://pub.example/10.1000/{i}" for i in range(3)]
++    for host, gap in (("doi.org", 0.18), ("pub.example", 0.28)):
++        t = sorted(starts[host])
++        assert all(later - earlier >= gap for earlier, later in itertools.pairwise(t)), host

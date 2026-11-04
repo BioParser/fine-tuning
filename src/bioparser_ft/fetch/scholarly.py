@@ -7,7 +7,8 @@ DataCite and CORE.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from concurrent.futures import Executor
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
@@ -80,9 +81,10 @@ def _first(xs: Any) -> str:
 
 
 class Scholarly:
-    def __init__(self, client: PoliteClient, *, email: str | None = None):
+    def __init__(self, client: PoliteClient, *, email: str | None = None, pool: Executor | None = None):
         self.c = client
         self.email = email
+        self.pool = pool  # With a thread pool, the API calls of one stage go out at the same time
         self.s2_key = os.environ.get("S2_API_KEY")
         self.core_key = os.environ.get("CORE_API_KEY")
         self.openalex_key = os.environ.get("OPENALEX_API_KEY")
@@ -94,6 +96,16 @@ class Scholarly:
         if self.openalex_key:
             params["api_key"] = self.openalex_key
         return params | self._mailto()
+
+    def _parallel(self, *calls: Callable[[], Any]) -> list[Any]:
+        """Do the calls at the same time, and return the results in the sequence of the calls.
+
+        The calls go to different hosts. The client keeps the rate limit of each host.
+        """
+        if self.pool is None:
+            return [call() for call in calls]
+        futures = [self.pool.submit(call) for call in calls]
+        return [f.result() for f in futures]
 
     def _check(self, paper: Paper, title: str, year: int | None, authors: list[str]) -> Verdict:
         return verify(paper.citation, paper.title, paper.first_author, paper.year, title, year, authors)
@@ -298,23 +310,32 @@ class Scholarly:
                 landing.append(loc["landing_page_url"])
         return cands, landing
 
-    def oa_candidates(self, doi: str) -> Iterator[list[Candidate]]:
+    def oa_candidates(self, doi: str, info: dict | None = None) -> Iterator[list[Candidate]]:
         """Yield the candidates in batches, with the best sources first.
 
         When a batch gives a good PDF, the caller stops. Then the code does not call the other APIs.
+        The function writes the open-access status of Unpaywall or OpenAlex to info["oa_status"]:
+        gold, diamond, hybrid, bronze, green or closed.
         """
+        info = {} if info is None else info
         landing: list[str] = []
+        qdoi = quote(doi, safe="/")
         # Stage 0: Unpaywall and OpenAlex. They are the largest open-access indexes and they give the version.
+        u, w = self._parallel(
+            # Unpaywall operates only with a contact email
+            lambda: self.c.get_json(UNPAYWALL + qdoi, {"email": self.email}) if self.email else None,
+            lambda: self.c.get_json(f"{OPENALEX}/doi:{qdoi}", self._openalex_params()),
+        )
         batch: list[Candidate] = []
-        if self.email:  # Unpaywall operates only with a contact email
-            u = self.c.get_json(UNPAYWALL + quote(doi, safe="/"), {"email": self.email})
-            for loc in [(u or {}).get("best_oa_location"), *((u or {}).get("oa_locations") or [])]:
-                if not loc:
-                    continue
-                if c := make_candidate(loc.get("url_for_pdf"), "unpaywall", version=loc.get("version") or ""):
-                    batch.append(c)
-                landing += [x for x in (loc.get("url_for_landing_page"), loc.get("url")) if x]
-        w = self.c.get_json(f"{OPENALEX}/doi:{quote(doi, safe='/')}", self._openalex_params())
+        for loc in [(u or {}).get("best_oa_location"), *((u or {}).get("oa_locations") or [])]:
+            if not loc:
+                continue
+            if c := make_candidate(loc.get("url_for_pdf"), "unpaywall", version=loc.get("version") or ""):
+                batch.append(c)
+            landing += [x for x in (loc.get("url_for_landing_page"), loc.get("url")) if x]
+        info["oa_status"] = (
+            (u or {}).get("oa_status") or ((w or {}).get("open_access") or {}).get("oa_status") or ""
+        )
         if w:
             c2, l2 = self._openalex_locations(w)
             batch += c2
@@ -325,10 +346,15 @@ class Scholarly:
         yield sorted(batch)
 
         # Stage 1: Europe PMC for PMC copies, Semantic Scholar, and the full-text links in Crossref.
-        batch = []
-        e = self.c.get_json(
-            EUROPEPMC, {"query": f'DOI:"{doi}"', "format": "json", "resultType": "core", "pageSize": 1}
+        headers = {"x-api-key": self.s2_key} if self.s2_key else None
+        e, s, cr = self._parallel(
+            lambda: self.c.get_json(
+                EUROPEPMC, {"query": f'DOI:"{doi}"', "format": "json", "resultType": "core", "pageSize": 1}
+            ),
+            lambda: self.c.get_json(S2 + f"DOI:{qdoi}", {"fields": "openAccessPdf"}, headers),
+            lambda: self.c.get_json(f"{CROSSREF}/{qdoi}", self._mailto()),
         )
+        batch = []
         for r in ((e or {}).get("resultList") or {}).get("result", [])[:1]:
             pmcid = pmcid or r.get("pmcid") or ""
             for f in (r.get("fullTextUrlList") or {}).get("fullTextUrl") or []:
@@ -345,12 +371,9 @@ class Scholarly:
             batch.append(
                 make_candidate(f"https://europepmc.org/articles/{pmcid}?pdf=render", "europepmc", stage=1)
             )
-        headers = {"x-api-key": self.s2_key} if self.s2_key else None
-        s = self.c.get_json(S2 + f"DOI:{quote(doi, safe='/')}", {"fields": "openAccessPdf"}, headers)
         batch.append(
             make_candidate(((s or {}).get("openAccessPdf") or {}).get("url"), "semanticscholar", stage=1)
         )
-        cr = self.c.get_json(f"{CROSSREF}/{quote(doi, safe='/')}", self._mailto())
         item = (cr or {}).get("message") or {}
         for link in item.get("link") or []:
             if link.get("content-type") == "application/pdf":
