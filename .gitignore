@@ -220,10 +220,23 @@ __marimo__/
 .streamlit/secrets.toml
 
 # vim
-*.~
+*~
 *.un~
 
 # data
 /data/
 # outputs
 /outputs/
+
+# client data and everything derived from it (confidential + copyrighted)
+/fine_tuning_data/**
+!/fine_tuning_data/README.md
+!/fine_tuning_data/manifest.example.tsv
+*.pdf
+# model weights can reproduce client data
+/lora_model/
+/unsloth_compiled_cache/
+*.safetensors
+*.gguf
+# tool caches
+.ruff_cache/
