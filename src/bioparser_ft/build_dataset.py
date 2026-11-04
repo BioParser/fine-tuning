@@ -107,7 +107,8 @@ def build(
             warnings += [f"{tsv.name}: {w}" for w in table.warnings]
 
         example_id = pair.markdown.key
-        markdown = clean_markdown(pair.markdown.read_text())
+        raw_markdown = pair.markdown.read_text()
+        markdown = clean_markdown(raw_markdown)  # For the coverage check and the report
         cov = label_coverage(markdown, records)
         reason = None
         if not records:
@@ -155,8 +156,9 @@ def build(
                 "references": records[0]["references"],
                 "n_rows": len(records),
                 "value_coverage": cov.value_ratio,
-                # markdown is cleaned (again, idempotently) inside build_messages
-                "messages": build_messages(markdown, to_model_tsv(records)),
+                # build_messages cleans the text one time, as at inference. A second clean can give
+                # a different text: for example, NFC runs before the code removes zero-width characters.
+                "messages": build_messages(raw_markdown, to_model_tsv(records)),
             }
         )
 

@@ -19,7 +19,7 @@ import argparse
 import json
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -35,8 +35,13 @@ METRICS = ("row", "cell", "value")
 def _norm(value: str) -> str:
     v = " ".join(value.split()).casefold()
     try:
-        return format(Decimal(v).normalize(), "f")
-    except InvalidOperation:
+        d = Decimal(v)
+        # Model output can contain "1e1000000". Then normalize() raises Overflow, which is not an
+        # InvalidOperation, and "f" can write one million digits. Compare these values as text.
+        if not d.is_finite() or abs(d.adjusted()) > 100:
+            return v
+        return format(d.normalize(), "f")
+    except ArithmeticError:  # The base class of all decimal errors
         return v
 
 

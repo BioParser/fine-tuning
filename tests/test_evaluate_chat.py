@@ -49,6 +49,11 @@ def test_scores() -> None:
     assert numeric["value"]["f1"] == 1.0  # "81.70" == "81.7"
 
 
+def test_scores_survive_extreme_numbers() -> None:
+    pred = [dict(GOLD[0], verbatimTraitValue="1e1000000"), dict(GOLD[1], verbatimTraitValue="9" * 5000)]
+    assert aggregate([score_document(pred, GOLD)])["value"]["f1"] == 0.0  # No crash
+
+
 def test_evaluate_files(tmp_path: Path) -> None:
     tsv = "\n".join(["\t".join(MODEL_COLUMNS)] + ["\t".join(r[c] for c in MODEL_COLUMNS) for r in GOLD])
     ds = tmp_path / "test.jsonl"

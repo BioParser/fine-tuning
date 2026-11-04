@@ -38,8 +38,16 @@ MAX_WARNINGS = 50  # per file / per parse; keeps reports readable
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")  # keeps \t \n \r
 _ZERO_WIDTH = re.compile(r"[​-‍⁠﻿]")
-_LINEBREAKS = re.compile(r"\s*[\r\n  ]+\s*")
+_LINE_BREAK = re.compile(r"[\r\n\u2028\u2029]")
 _INLINE_WS = re.compile(r"\s+")  # Unicode-aware: TAB, NBSP (801 cells), thin spaces, ...
+
+
+def _join_whitespace(match: re.Match[str]) -> str:
+    """Return LIST_SEPARATOR for a whitespace run with a line break, and one space for other runs.
+
+    normalize_cell uses this function in one regex pass, so the time is linear for each cell.
+    """
+    return LIST_SEPARATOR if _LINE_BREAK.search(match.group()) else " "
 
 
 def normalize_cell(value: str | None) -> str:
@@ -54,8 +62,7 @@ def normalize_cell(value: str | None) -> str:
         return ""
     v = unicodedata.normalize("NFC", value)
     v = _ZERO_WIDTH.sub("", _CONTROL.sub("", v)).strip()
-    v = _LINEBREAKS.sub(LIST_SEPARATOR, v)
-    return _INLINE_WS.sub(" ", v).strip()
+    return _INLINE_WS.sub(_join_whitespace, v).strip()
 
 
 def canonicalize(column: str, value: str) -> str:

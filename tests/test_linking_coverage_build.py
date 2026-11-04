@@ -64,6 +64,10 @@ def test_numbers_in() -> None:
     assert "3" not in numbers_in("n = 3")  # small integers carry no signal
 
 
+def test_numbers_in_ignores_long_digit_runs() -> None:
+    assert numbers_in("ID " + "1" * 5000 + ", FA 37.40 mm") == {"37.4"}
+
+
 def test_build_end_to_end(ets_dir: Path, parsed_dir: Path, manifest: Path, tmp_path: Path) -> None:
     out = tmp_path / "processed"
     report = build(ets_dir, parsed_dir, out, manifest=manifest, val_fraction=0.0, test_fraction=0.0)

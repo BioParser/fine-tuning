@@ -15,8 +15,9 @@ _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 # Zero-width characters that only waste tokens or break word matching.
 _ZERO_WIDTH = re.compile(r"[​-‍⁠﻿]")
 # ![alt](images/page_0_image_9.jpg): the image itself is not available to a text model.
-_IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
-_TRAILING_WS = re.compile(r"[ \t]+\n")
+# The alt text cannot contain "[", and the path cannot contain "(". For this reason, each search
+# stops at the next "[" or "(", and the time is linear also for hostile input.
+_IMAGE = re.compile(r"!\[([^\[\]]*)\]\([^()]*\)")
 _BLANK_RUNS = re.compile(r"\n{3,}")
 
 
@@ -27,6 +28,8 @@ def clean_markdown(text: str, *, drop_images: bool = True) -> str:
     t = _ZERO_WIDTH.sub("", _CONTROL.sub("", t))
     if drop_images:
         t = _IMAGE.sub(lambda m: m.group(1).strip(), t)
-    t = _TRAILING_WS.sub("\n", t)
+    # Remove the spaces and TABs at the end of each line. Do not use a regex such as [ \t]+\n:
+    # its time is quadratic on a long run of spaces without a line break.
+    t = "\n".join(line.rstrip(" \t") for line in t.split("\n"))
     t = _BLANK_RUNS.sub("\n\n", t)
     return t.strip()

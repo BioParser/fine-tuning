@@ -23,6 +23,7 @@ VALUE_COLUMNS = (
     "individualCount",
 )
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
+MAX_NUMBER_CHARS = 30  # A longer digit run (an ID, a sequence or OCR noise) is not a label value
 _WORD = re.compile(r"[a-z]+")
 _NAME_STOPWORDS = frozenset({"cf", "aff", "sp", "spp", "nov", "nr", "n", "var", "ssp", "subsp"})
 
@@ -48,6 +49,8 @@ def numbers_in(text: str, *, min_value: int = 10) -> set[str]:
     as "3" occur in any article and would make the check meaningless."""
     out: set[str] = set()
     for token in _NUMBER.findall(text):
+        if len(token) > MAX_NUMBER_CHARS:
+            continue  # int() below stops with an error above 4,300 digits
         for canon in _canonical_numbers(token):
             if "." in canon or int(canon) >= min_value:
                 out.add(canon)

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import math
 import os
@@ -53,6 +54,9 @@ class TrainConfig:
     dataset_dir: Path = Path("data/processed")
     output_dir: Path = Path("outputs/qwen3.5-0.8b-ets")
     model_name: str = "Qwen/Qwen3.5-0.8B"
+    # A commit hash of the Hub repository. With None, each run loads the newest commit, and the
+    # weights, the tokenizer or the chat template can change.
+    model_revision: str | None = None
     max_seq_length: int = 16384  # prompt + paper + TSV; longer examples are dropped, not cut
     lora_r: int = 16
     lora_alpha: int = 16
@@ -88,6 +92,17 @@ def _sha256(path: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
 
 
+def _package_versions() -> dict[str, str | None]:
+    """Return the versions of the training stack. A person needs them to make the same model again."""
+    versions: dict[str, str | None] = {}
+    for name in ("unsloth", "unsloth-zoo", "torch", "transformers", "trl", "peft", "datasets"):
+        try:
+            versions[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            versions[name] = None
+    return versions
+
+
 def lora_report(model: Any) -> Counter[str]:
     """Number of LoRA-wrapped modules per leaf name (verifies the targets really attached)."""
     counts: Counter[str] = Counter()
@@ -103,6 +118,7 @@ def load_model(cfg: TrainConfig) -> tuple[Any, Any]:
 
     model, processor = FastLanguageModel.from_pretrained(
         model_name=cfg.model_name,
+        revision=cfg.model_revision,
         max_seq_length=cfg.max_seq_length,  # also sizes Unsloth's embedding-offload decision
         dtype=None,  # auto: bf16 if supported, else float32 for Qwen3.5
         load_in_4bit=False,  # 16-bit LoRA
@@ -196,6 +212,8 @@ def run(cfg: TrainConfig) -> Path:
     train_raw, val_raw = read_split(cfg.dataset_dir, "train"), read_split(cfg.dataset_dir, "val")
     if not train_raw:
         raise SystemExit(f"no training data in {cfg.dataset_dir}; run bioparser-build-dataset first")
+    if cfg.model_revision is None:
+        print(f"WARNING: no --model-revision. The Hub gives the newest commit of {cfg.model_name}.")
 
     model, processor = load_model(cfg)
     import torch  # after unsloth
@@ -241,6 +259,9 @@ def save_artifacts(
         "bioparser_ft": __version__,
         "prompt_version": PROMPT_VERSION,
         "model_columns": list(MODEL_COLUMNS),
+        # The commit that the Hub gave. transformers sets config._commit_hash, also without a revision.
+        "base_model_commit": getattr(getattr(model, "config", None), "_commit_hash", None),
+        "packages": _package_versions(),
         "config": {k: (str(v) if isinstance(v, Path) else v) for k, v in asdict(cfg).items()},
         "train_ids": [r["id"] for r in train_rows],
         "val_ids": [r["id"] for r in val_rows],
@@ -254,6 +275,8 @@ def save_artifacts(
     if cfg.merge_16bit:  # standalone weights for vLLM / transformers serving
         merged = cfg.output_dir / "merged_16bit"
         model.save_pretrained_merged(str(merged), processor, save_method="merged_16bit")
+        # The serving code reads this file and examines the prompt version (infer.check_prompt_version).
+        (merged / "bioparser_ft.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
         print(f"merged model saved to {merged}")
     if cfg.push_to_hub:
         push_private(adapter_dir, cfg.push_to_hub)
@@ -267,6 +290,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     ap.add_argument("--dataset-dir", type=Path, default=d.dataset_dir)
     ap.add_argument("--output-dir", type=Path, default=d.output_dir)
     ap.add_argument("--model-name", default=d.model_name)
+    ap.add_argument(
+        "--model-revision",
+        default=d.model_revision,
+        help="commit hash of the base model on the Hub. With it, each run trains on the same weights.",
+    )
     ap.add_argument("--max-seq-length", type=int, default=d.max_seq_length)
     ap.add_argument("--lora-r", type=int, default=d.lora_r)
     ap.add_argument("--lora-alpha", type=int, default=d.lora_alpha)
@@ -284,6 +312,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             dataset_dir=a.dataset_dir,
             output_dir=a.output_dir,
             model_name=a.model_name,
+            model_revision=a.model_revision,
             max_seq_length=a.max_seq_length,
             lora_r=a.lora_r,
             lora_alpha=a.lora_alpha,

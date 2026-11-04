@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 import time
 from collections.abc import Sequence
@@ -20,7 +21,9 @@ from pathlib import Path
 from typing import Any
 
 from .chat import render_prompt, text_tokenizer
-from .schema import build_messages
+from .schema import PROMPT_VERSION, build_messages
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -32,12 +35,31 @@ class Generation:
     seconds: float
 
 
+def check_prompt_version(model_path: str | Path) -> None:
+    """Stop if the model was trained with a different PROMPT_VERSION.
+
+    With a different version, the model gets a prompt that it did not learn. Then the output is
+    worse, but no error occurs. train.save_artifacts writes the version to bioparser_ft.json.
+    """
+    meta_path = Path(model_path) / "bioparser_ft.json"
+    if not meta_path.is_file():  # For example, a Hub id
+        log.warning("Cannot examine the prompt version: %s does not exist", meta_path)
+        return
+    trained = json.loads(meta_path.read_text(encoding="utf-8")).get("prompt_version")
+    if trained != PROMPT_VERSION:
+        raise ValueError(
+            f"{model_path} was trained with prompt_version {trained!r}, but the code uses "
+            f"{PROMPT_VERSION!r}. Train the model again, or use the code of its version."
+        )
+
+
 def load_for_inference(model_path: str | Path, *, max_seq_length: int = 32768) -> tuple[Any, Any]:
     """Load base + adapter exactly as trained: 16-bit LoRA, NOT 4-bit.
 
     (The original notebook trained 16-bit and reloaded with load_in_4bit=True,
     i.e. served the adapter on differently quantised weights.)
     """
+    check_prompt_version(model_path)  # A fast check before the slow model load
     from unsloth import FastLanguageModel  # import before transformers so patches apply
 
     model, processor = FastLanguageModel.from_pretrained(

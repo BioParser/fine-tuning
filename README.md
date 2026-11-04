@@ -224,42 +224,60 @@ The tools stop with an error if the dataset has an old `PROMPT_VERSION`.
 ## FastAPI integration
 
 The modules `schema`, `markdown`, `tsv` and `postprocess` use only the Python standard library.
-The FastAPI service can import these modules or keep a copy of them.
+The FastAPI service can import these modules or keep a copy of them. If the service keeps a copy,
+copy the files again after each change in this repository.
 
 ```python
-import json
 import threading
 
-from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 
 from bioparser_ft.infer import generate_tsv, load_for_inference
 from bioparser_ft.postprocess import to_ets_records
 
 app = FastAPI()
+# Each worker process loads its own copy of the model. Use one worker for each GPU.
 model, processor = load_for_inference("outputs/qwen3.5-0.8b-ets/lora_adapter")
 gpu = threading.Lock()  # One generation at a time on one GPU. For more throughput, use vLLM.
+MAX_MARKDOWN_CHARS = 400_000  # Approximately 100,000 tokens: more than the context of the model
 
 
 class ParseRequest(BaseModel):
-    markdown: str  # MinerU output for one PDF file. Use the MinerU version of the training data.
-    references: str | None = None  # A correct Harvard citation, if the API has one
+    # MinerU output for one PDF file. Use the MinerU version of the training data.
+    markdown: str = Field(max_length=MAX_MARKDOWN_CHARS)
+    references: str | None = Field(default=None, max_length=2_000)  # A correct Harvard citation
 
 
 @app.post("/parse")
 def parse(req: ParseRequest) -> dict:  # A sync function: FastAPI runs it in a worker thread.
-    with gpu:
+    # Do not wait for the GPU without a limit. Each request that waits keeps one of the 40 threads.
+    if not gpu.acquire(timeout=1.0):
+        raise HTTPException(503, "The GPU is busy. Try again later.", headers={"Retry-After": "60"})
+    try:
         gen = generate_tsv(model, processor, req.markdown, max_new_tokens=8192, max_seq_length=32768)
+    finally:
+        gpu.release()
+    if gen.new_tokens == 0 and not gen.complete:  # The prompt is longer than max_seq_length
+        raise HTTPException(413, "The article is too long for the model.")
     result = to_ets_records(gen.text, references=req.references, complete=gen.complete)
     # {"records": [...20 ETS columns...], "warnings": [...], "complete": bool}
-    return json.loads(result.to_json())
+    return {"records": result.records, "warnings": result.warnings, "complete": result.complete}
 ```
+
+**CAUTION:** One generation can take minutes on a small GPU. Set the read timeout of the client and
+of the reverse proxy to more than the longest generation. If not, the client sends the request
+again, and the GPU does the same work two times.
 
 For vLLM, export a merged 16-bit model with `bioparser-train --merge-16bit`. Then use one of the
 two methods that follow:
 
-- Send a prompt from `bioparser_ft.chat.render_prompt` to a raw completion endpoint.
-- Use the chat endpoint with `chat_template_kwargs={"enable_thinking": false}`.
+- Send a prompt from `bioparser_ft.chat.render_prompt` to a raw completion endpoint. This method
+  gives the same prompt text as the training. Use this method if you are not sure.
+- Use the chat endpoint with `chat_template_kwargs={"enable_thinking": false}`. Some versions of
+  the chat template ignore this flag, or write no empty think block. `render_prompt` corrects
+  this, but the vLLM chat endpoint does not. Before you use this method, compare the prompt tokens
+  of vLLM (for example, from its `/tokenize` endpoint) with the tokens of `render_prompt`.
 
 ## GPU notes: RTX 2060 Max-Q with 6 GB
 > [!NOTE] 
