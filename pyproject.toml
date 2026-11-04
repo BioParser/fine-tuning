@@ -46,6 +46,7 @@ bioparser-train = "bioparser_ft.train:main"
 bioparser-predict = "bioparser_ft.infer:main"
 bioparser-evaluate = "bioparser_ft.evaluate:main"
 bioparser-fetch-pdfs = "bioparser_ft.fetch.cli:main"
+bioparser-link-pdfs = "bioparser_ft.fetch.link:main"
 
 [build-system]
 requires = ["uv_build>=0.12.19,<0.14.0"]

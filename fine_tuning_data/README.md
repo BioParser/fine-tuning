@@ -31,6 +31,10 @@ uvx --from "mineru==4.1.6" mineru-models-download --tier basic
 uv run bioparser-fetch-pdfs --email you@helsinki.fi --browser --manual \
     --proxy-prefix "https://login.libproxy.helsinki.fi/login?url="
 
+# 1b. Optional: if you downloaded PDF files yourself, put them in fine_tuning_data/pdfs/_unverified/.
+#     Then link them to the papers. Without --apply, the command only shows the result.
+uv run bioparser-link-pdfs --apply
+
 # 2. Parse the PDF files with MinerU.
 scripts/parse_pdfs.sh
 
@@ -71,7 +75,7 @@ The sections below give more information about each step.
 fine_tuning_data/
 ├── ets_tsv/            the client ETS files, for example "ETS_Abdel-Hamid and Alqahtani, 2022.tsv"
 ├── pdfs/               the articles, for example "Abdel-Hamid and Alqahtani, 2022.pdf"
-│   └── _unverified/    PDF files without the title or the DOI: examine them manually
+│   └── _unverified/    PDF files without the title or the DOI, and your own downloads: bioparser-link-pdfs
 ├── parsed/             the MinerU output: one "<pdf-stem>.zip" or ".md" file for each PDF file
 ├── manifest.tsv        pairs with different file names (the fetch command adds rows)
 ├── doi_overrides.tsv   optional: your corrections of DOI matches (columns: tsv, doi, url, note)
@@ -274,6 +278,47 @@ Other sources for the articles that you cannot get:
 - The client. The client has the PDF files that they used for the labels.
 - An interlibrary loan from Helsinki University Library.
 - The authors of the article. Many authors send a copy if you ask.
+
+### Link the PDF files that you downloaded yourself
+
+A file from EZproxy or from a browser can have any name, for example `gyac068.pdf`. Put these
+files in `fine_tuning_data/pdfs/_unverified/`. Then use this command:
+
+```bash
+uv run bioparser-link-pdfs
+```
+
+The command reads the first pages of each file. It compares the file with each paper: the DOI,
+the title, the first author and the year. It also uses the file name, because some names contain
+the DOI or the title. The command shows the result for each file, but it does not move files.
+
+To move the files that agree with one paper, add `--apply`:
+
+```bash
+uv run bioparser-link-pdfs --apply
+```
+
+The command moves each of these files to `pdfs/<paper>.pdf`, and it adds the file to
+`pdf_sources.tsv`. Steps 2 and 3 then link the file to the TSV files of the paper. The command
+does not replace a file in `pdfs/`. It also examines the PDF files in `pdfs/` that do not have
+the name of a paper.
+
+| Result | Description |
+|---|---|
+| `MOVE` | The file agrees with one paper that has no PDF file. |
+| `REVIEW` | No paper agrees enough, or two papers agree. The command shows the best guess. |
+| `DUPLICATE` | The paper has a PDF file, or a different file agrees better with the paper. |
+| `SKIP` | The file is not a PDF file, or pypdf cannot read it. |
+
+Examine each `REVIEW` file. If the best guess is correct, give the file and the paper:
+
+```bash
+uv run bioparser-link-pdfs --apply --link "67640adb47e5f1734609627.pdf=Smith et al., 2023"
+```
+
+If two papers agree with one file, the two papers can be one article with two different
+citations, for example `Froidevaux et al., 2023 - 02` and `Jérémy et al., 2023_02`. Link the
+file to one paper. Then add a row to `manifest.tsv` for the TSV files of the other paper.
 
 ## Step 2. Parse the PDF files
 

@@ -72,3 +72,45 @@ def test_vocabularies_are_canonical(tables: list[EtsTable]) -> None:
     print("\n" + "\n".join(f"{c}: {dict(v)}" for c, v in seen.items()))
     assert set(seen["taxonRank"]) <= {"", "Genus", "Species", "Subspecies"}
     assert set(seen["sex"]) <= {"", "Male", "Female", "Mixed", "Unknown"}
+
+
+def test_link_pdfs_never_picks_a_wrong_paper(tmp_path: Path) -> None:
+    """A synthetic PDF file of each real paper links to that paper, or goes to a person for review.
+
+    Random title words never give a match. The text has no accents, like the text that
+    pypdf extracts after norm().
+    """
+    pytest.importorskip("pypdf")
+    pytest.importorskip("httpx")
+    import random
+    import unicodedata
+
+    from conftest import FILLER, make_pdf
+
+    from bioparser_ft.fetch.citations import group_papers
+    from bioparser_ft.fetch.link import Target, decide
+
+    def pdf(text: str) -> bytes:
+        # Remove the accents. Other characters that make_pdf cannot write become spaces, as in real text.
+        folded = unicodedata.normalize("NFKD", text)
+        kept = (c if c.isascii() and c not in "()\\" else " " for c in folded if not unicodedata.combining(c))
+        return make_pdf("".join(kept))
+
+    assert ETS_DIR is not None
+    papers = group_papers(Path(ETS_DIR))
+    targets = [Target(p, p.doi, [p.title], False) for p in papers]
+    path = tmp_path / "x.pdf"
+    actions: Counter[str] = Counter()
+    for p in papers:
+        path.write_bytes(pdf(f"{p.title}. {p.first_author} et al. {p.year or ''}. {FILLER}"))
+        d = decide(path, targets)
+        assert d.action in ("move", "review"), p.key
+        if d.action == "move":
+            assert d.target is not None and d.target.paper.key == p.key
+        actions[d.action] += 1
+    assert actions["move"] >= 0.95 * len(papers)
+    rng = random.Random(1)
+    words = sorted({w for p in papers for w in p.title.split() if w.isalpha()})
+    for _ in range(100):
+        path.write_bytes(pdf(" ".join(rng.sample(words, 12)) + FILLER))
+        assert decide(path, targets).action == "review"

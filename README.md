@@ -105,6 +105,17 @@ To get the PDF files, do the steps that follow:
        --proxy-prefix "https://login.libproxy.helsinki.fi/login?url="
    ```
 
+6. If you downloaded PDF files yourself, put them in `fine_tuning_data/pdfs/_unverified/`. Then
+   link them to the papers. The command reads each file, and it moves the files that agree with
+   one paper to `fine_tuning_data/pdfs/`. Without `--apply`, it only shows the result:
+
+   ```bash
+   uv run bioparser-link-pdfs --apply
+   ```
+
+   For more information, refer to
+   [Link the PDF files that you downloaded yourself](fine_tuning_data/README.md#link-the-pdf-files-that-you-downloaded-yourself).
+
 The command writes these results:
 
 - `fine_tuning_data/pdfs/`: the PDF files that contain the title or the DOI of the article

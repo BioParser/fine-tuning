@@ -39,7 +39,7 @@ import re
 import tempfile
 import threading
 from collections import Counter
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -289,7 +289,7 @@ def _cell(value: object) -> str:
     return re.sub(r"[\t\r\n]+", " ", str(value)) if value is not None else ""
 
 
-def _read_report(path: Path) -> dict[str, dict[str, str]]:
+def read_report(path: Path) -> dict[str, dict[str, str]]:
     if not path.exists():
         return {}
     with path.open(newline="", encoding="utf-8") as fh:
@@ -297,7 +297,7 @@ def _read_report(path: Path) -> dict[str, dict[str, str]]:
 
 
 def write_report(path: Path, outcomes: list[Outcome]) -> None:
-    previous = _read_report(path)
+    previous = read_report(path)
     rows: list[Mapping[str, object]] = []
     for oc in outcomes:
         if oc.status == "exists" and oc.paper.key in previous:
@@ -315,6 +315,11 @@ def write_report(path: Path, outcomes: list[Outcome]) -> None:
             "tsv_files": " | ".join(oc.paper.tsv_files), "citation": oc.paper.citation,
             "matched_title": r.title, "notes": " ; ".join(dict.fromkeys(oc.notes)),
         })  # fmt: skip
+    write_report_rows(path, rows)
+
+
+def write_report_rows(path: Path, rows: Iterable[Mapping[str, object]]) -> None:
+    """Write pdf_sources.tsv: one row for each paper, in the columns of REPORT_COLUMNS."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh, delimiter="\t", lineterminator="\n", quoting=csv.QUOTE_NONE, escapechar="\\")
@@ -373,6 +378,7 @@ def summarise(outcomes: list[Outcome], report: Path) -> None:
     if missing:
         print(
             "next steps: use --browser, then --manual with --proxy-prefix for library access. "
+            "For files that you downloaded yourself, use bioparser-link-pdfs. "
             "Add incorrect or unresolved matches to doi_overrides.tsv. Ask the client for the other PDF files."
         )
 
