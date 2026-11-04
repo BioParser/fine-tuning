@@ -64,6 +64,10 @@ addopts = "-ra"
 [tool.ruff]
 line-length = 110
 target-version = "py313"
+# The original Unsloth tutorial is a reference, not the code of this repository (notebooks/README.md).
+# force-exclude: the exclusion also applies to the files that pre-commit gives to ruff.
+extend-exclude = ["notebooks/Qwen3_5_0_8B_original_tutorial.ipynb"]
+force-exclude = true
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]

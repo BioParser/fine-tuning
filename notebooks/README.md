@@ -4,6 +4,11 @@ as a reference, but note that the `pip install` commands in the notebook will
 install unneeded dependencies. Also the notebook does not follow the repo
 development. 
 
+The test data of the tutorial is client data: 3 parsed articles and their TSV labels. For this
+reason, it is not in git. The notebook loads it from `fine_tuning_data/tutorial_test_data.json`.
+Get this file from the team. The notebook has no saved outputs, because the outputs contained
+client data and local paths.
+
 # Quick start 
 ```
 uv run jupyter lab
