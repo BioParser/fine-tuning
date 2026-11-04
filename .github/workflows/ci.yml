@@ -1,0 +1,97 @@
+name: GitHub CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read # to fetch code (actions/checkout)
+
+env:
+  # The setup action installs only the dev and fetch groups. Without this, each `uv run` would
+  # first install the full GPU training stack.
+  UV_NO_SYNC: "1"
+
+jobs:
+  lint:
+    name: Lint and format
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Python
+        uses: ./.github/actions/setup
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format
+        run: uv run ruff format --check .
+
+      # The same hooks as in .pre-commit-config.yaml. A person can skip the local hooks.
+      - name: No client data or model weights in git
+        run: uv run pre-commit run no-client-data --all-files
+
+      - name: No tokens or private keys in git
+        run: uv run pre-commit run no-secrets --all-files
+
+  typecheck:
+    name: Type check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Python
+        uses: ./.github/actions/setup
+
+      - name: mypy
+        run: uv run mypy
+
+  test-unit:
+    name: Unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os != 'ubuntu-latest' }} # Win64/Ubuntu arm failure wont fail run for Ubuntu x64
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-26.04-arm, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Python
+        uses: ./.github/actions/setup
+
+      # The browser tests skip here: BIOPARSER_CHROMIUM is not set.
+      - name: Run unit tests
+        run: uv run pytest
+
+  test-browser:
+    name: Browser tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Python
+        uses: ./.github/actions/setup
+
+      - name: Install Chromium
+        run: uv run playwright install --with-deps chromium
+
+      - name: Run the fetch tests with Chromium
+        run: |
+          BIOPARSER_CHROMIUM="$(uv run python -c 'from playwright.sync_api import sync_playwright as s; p = s().start(); print(p.chromium.executable_path); p.stop()')"
+          export BIOPARSER_CHROMIUM
+          uv run pytest tests/test_fetch.py

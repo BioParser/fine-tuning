@@ -240,3 +240,7 @@ __marimo__/
 *.gguf
 # tool caches
 .ruff_cache/
+
+# git
+*.patch
+*.diff

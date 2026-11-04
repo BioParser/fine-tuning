@@ -239,7 +239,8 @@ def parse(req: ParseRequest) -> dict:  # A sync function: FastAPI runs it in a w
     with gpu:
         gen = generate_tsv(model, processor, req.markdown, max_new_tokens=8192, max_seq_length=32768)
     result = to_ets_records(gen.text, references=req.references, complete=gen.complete)
-    return json.loads(result.to_json())  # {"records": [...20 ETS columns...], "warnings": [...], "complete": bool}
+    # {"records": [...20 ETS columns...], "warnings": [...], "complete": bool}
+    return json.loads(result.to_json())
 ```
 
 For vLLM, export a merged 16-bit model with `bioparser-train --merge-16bit`. Then use one of the
@@ -293,6 +294,8 @@ only on your computer.
   `markdown.md`, in memory and with a size limit. The tools do not extract files to the disk.
 - Commit notebooks without outputs. The test `tests/test_notebook_clean.py` makes sure that the
   notebooks have no outputs.
+- The Git hooks and CI stop a commit with client data, PDF files, model weights or tokens. For
+  more information, refer to [Checks before a commit and in CI](#checks-before-a-commit-and-in-ci).
 
 ## Tests
 
@@ -311,3 +314,44 @@ only on your computer.
 The tests with client files make sure that the tools read all 181 TSV files with 50,060 records.
 They also make sure that each record goes through the model TSV format without changes. They
 also compare the `taxonRank` rule with the client labels.
+
+## Checks before a commit and in CI
+
+The checks are the same as in the [bioparser](https://github.com/bioparser/bioparser) repository.
+Install the Git hooks one time:
+
+```bash
+uv run pre-commit install
+```
+
+Before each commit, the hooks do these checks:
+
+- `uv-lock` makes sure that `uv.lock` agrees with `pyproject.toml`.
+- `ruff check`, `ruff format` and `mypy` examine the Python files. mypy uses the strict mode.
+- The notebooks must have no outputs.
+- Git must not get client data, PDF files, model weights, Hugging Face tokens or private keys.
+
+To do all checks on all files, use this command:
+
+```bash
+uv run pre-commit run --all-files
+```
+
+The GitHub Actions workflow `.github/workflows/ci.yml` does these checks for each pull request
+and for each push to `main`:
+
+| Job | Checks |
+|---|---|
+| Lint and format | `ruff check`, `ruff format --check`, and the checks for client data and tokens |
+| Type check | `mypy` in strict mode |
+| Unit tests | `pytest` on Ubuntu x64, Ubuntu ARM and Windows. Only an error on Ubuntu x64 stops the run. |
+| Browser tests | The tests of `bioparser-fetch-pdfs` with Chromium |
+
+CI does not install the GPU training stack, for example torch and Unsloth. The GitHub runners
+have no GPU, and the stack uses many GB of disk space. For this reason, CI installs only the groups `dev` and `fetch`, and
+the tests import the package from `src/`. Test changes to the training code on a computer with a
+GPU.
+
+Dependabot updates the GitHub Actions, the hooks and the Python packages each week. It does not
+update the GPU training stack, because CI cannot test it. CI uses uv 0.13.4. To get the same
+version or a newer one, use `uv self update`.

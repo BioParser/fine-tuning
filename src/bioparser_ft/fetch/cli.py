@@ -39,7 +39,7 @@ import re
 import tempfile
 import threading
 from collections import Counter
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -123,7 +123,7 @@ def fetch_candidate(
             continue
         source = cand.source if cand.kind == "pdf" else "landing"
         best = _better(best, Got(page.body, page.url, source, check_pdf(page.body, title, doi)))
-        if best.check.verified:
+        if best is not None and best.check.verified:
             break
     if best is None:
         notes.append(f"{cand.source}: no PDF link on {fetched.url[:90]}")
@@ -131,7 +131,7 @@ def fetch_candidate(
 
 
 def fetch_http(
-    client: PoliteClient, sch: Scholarly, paper: Paper, res: Resolution, info: dict | None = None
+    client: PoliteClient, sch: Scholarly, paper: Paper, res: Resolution, info: dict[str, str] | None = None
 ) -> tuple[Got | None, list[str]]:
     """Use the candidates one batch at a time, and stop at the first verified PDF.
 
@@ -231,7 +231,12 @@ def browser_pass(
 
 
 def _browser_worker(
-    todo: queue.SimpleQueue, total: int, args: argparse.Namespace, *, manual: bool, stop: threading.Event
+    todo: queue.SimpleQueue[tuple[int, Outcome]],
+    total: int,
+    args: argparse.Namespace,
+    *,
+    manual: bool,
+    stop: threading.Event,
 ) -> None:
     """Get the papers from the queue, one at a time, with one browser. Each thread has its own browser."""
     from .browser import BrowserFetcher
@@ -293,7 +298,7 @@ def _read_report(path: Path) -> dict[str, dict[str, str]]:
 
 def write_report(path: Path, outcomes: list[Outcome]) -> None:
     previous = _read_report(path)
-    rows = []
+    rows: list[Mapping[str, object]] = []
     for oc in outcomes:
         if oc.status == "exists" and oc.paper.key in previous:
             rows.append(previous[oc.paper.key] | {"status": "exists"})
@@ -391,7 +396,7 @@ def process_paper(paper: Paper, client: PoliteClient, sch: Scholarly, args: argp
     elif args.resolve_only:
         oc.status = "resolved"
     else:
-        info: dict = {}
+        info: dict[str, str] = {}
         got, notes = fetch_http(client, sch, paper, res, info)
         oc.oa_status = info.get("oa_status", "")
         oc.notes += notes[-8:]

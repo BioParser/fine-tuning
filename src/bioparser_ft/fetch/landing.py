@@ -6,9 +6,10 @@ It also knows the PDF URL patterns of some publishers.
 from __future__ import annotations
 
 import re
+from typing import Any
 from urllib.parse import urljoin, urlsplit
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 # Meta tags with the PDF URL: Highwire Press tags (most publishers, OJS and DSpace),
 # bepress Digital Commons and EPrints.
@@ -25,24 +26,34 @@ _DEPRIORITISE = re.compile(
 )
 
 
+def _attr(tag: Tag, name: str) -> str:
+    """Return the attribute as one string. bs4 gives a list for attributes with more than one value."""
+    value = tag.get(name)
+    if isinstance(value, list):
+        return " ".join(value)
+    return value or ""
+
+
 def pdf_links_from_html(html: str | bytes, base_url: str, limit: int = 12) -> list[str]:
     """Return the PDF URLs of an HTML page. The best URLs come first: the meta tags, then the links."""
     soup = BeautifulSoup(html, "html.parser")
-    meta, links, weak = [], [], []
+    meta: list[str] = []
+    links: list[str] = []
+    weak: list[str] = []
     for m in soup.find_all("meta"):
-        name = (m.get("name") or m.get("property") or "").strip().lower()
-        if name in PDF_META and m.get("content"):
-            meta.append(urljoin(base_url, m["content"].strip()))
+        name = (_attr(m, "name") or _attr(m, "property")).strip().lower()
+        if name in PDF_META and _attr(m, "content"):
+            meta.append(urljoin(base_url, _attr(m, "content").strip()))
     for link in soup.find_all("link", href=True):
-        if "pdf" in (link.get("type") or "").lower():
-            links.append(urljoin(base_url, link["href"]))
+        if "pdf" in _attr(link, "type").lower():
+            links.append(urljoin(base_url, _attr(link, "href")))
     for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
+        href = _attr(a, "href").strip()
         low = href.lower()
         if low.startswith(("javascript:", "mailto:", "#", "tel:")):
             continue
         text = " ".join(a.get_text(" ", strip=True).split()).lower()[:80]
-        label = " ".join([text, (a.get("title") or "").lower(), (a.get("aria-label") or "").lower()])
+        label = " ".join([text, _attr(a, "title").lower(), _attr(a, "aria-label").lower()])
         path = urlsplit(low).path
         looks_pdf = (
             path.endswith(".pdf")
@@ -56,7 +67,8 @@ def pdf_links_from_html(html: str | bytes, base_url: str, limit: int = 12) -> li
         if looks_pdf:
             url = urljoin(base_url, href)
             (weak if _DEPRIORITISE.search(low + " " + label) else links).append(url)
-    out, seen = [], set()
+    out: list[str] = []
+    seen: set[str] = set()
     for url in meta + links + weak:
         if url not in seen and urlsplit(url).scheme in ("http", "https"):
             seen.add(url)
@@ -68,7 +80,7 @@ _PLOS = {"pone": "plosone", "pbio": "plosbiology", "pcbi": "ploscompbiol", "pgen
          "ppat": "plospathogens", "pntd": "plosntds", "pmed": "plosmedicine"}  # fmt: skip
 
 
-def publisher_pdf_urls(doi: str, crossref_item: dict | None = None) -> list[str]:
+def publisher_pdf_urls(doi: str, crossref_item: dict[str, Any] | None = None) -> list[str]:
     """Return the direct PDF URLs that publishers use for open-access articles."""
     d = doi.lower()
     prefix, _, suffix = d.partition("/")

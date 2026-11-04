@@ -1,0 +1,60 @@
+# In order to install this hook run `uv run pre-commit install`
+default_install_hook_types:
+  - pre-commit
+repos:
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    # uv 0.13.4. Keep in sync with .github/actions/setup/action.yml.
+    rev: "dd409d04a3fa4a50f918dddb3ad3c6d8f46ab2cd"
+    hooks:
+      - id: uv-lock
+
+  # --only-group: the hooks do not install the GPU training stack (torch, Unsloth).
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run --locked --only-group dev ruff check
+        language: system
+        types_or: [python, jupyter]
+
+      - id: ruff-format
+        name: ruff format
+        entry: uv run --locked --only-group dev ruff format
+        language: system
+        # ruff also formats the notebooks and the Python code blocks in Markdown files. CI checks them.
+        types_or: [python, jupyter, markdown]
+
+      - id: mypy
+        name: mypy
+        entry: uv run --locked --only-group dev --only-group fetch mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: notebooks-clean
+        name: notebooks have no outputs
+        entry: uv run --locked --only-group dev pytest -q --no-header tests/test_notebook_clean.py
+        language: system
+        files: \.ipynb$
+        pass_filenames: false
+
+      # CI runs this hook and the next one on all files.
+      - id: no-client-data
+        name: no client data or model weights
+        entry: Client data, PDF files and model weights must not be in git. Remove these files from the commit.
+        language: fail
+        files: |
+          (?x)^(
+              fine_tuning_data/(?!README\.md$|manifest\.example\.tsv$).*
+            | data/.*
+            | outputs/.*
+            | lora_model/.*
+            | unsloth_compiled_cache/.*
+            | .*\.(pdf|safetensors|gguf|pt|pth|ckpt)
+          )$
+
+      - id: no-secrets
+        name: no tokens or private keys
+        entry: '(hf_[A-Za-z0-9]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'
+        language: pygrep
+        exclude: ^\.pre-commit-config\.yaml$

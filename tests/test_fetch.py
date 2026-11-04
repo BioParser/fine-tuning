@@ -7,6 +7,7 @@ and a Chromium binary are available (BIOPARSER_CHROMIUM=/path/to/chrome).
 
 from __future__ import annotations
 
+import argparse
 import csv
 import itertools
 import json
@@ -16,22 +17,25 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from conftest import ets_row, write_ets
 
-httpx = pytest.importorskip("httpx")
+if TYPE_CHECKING:
+    import httpx
+else:
+    httpx = pytest.importorskip("httpx")
 pytest.importorskip("bs4")
 pytest.importorskip("pypdf")
 
-from bioparser_ft.fetch.citations import group_papers, parse_citation  # noqa: E402
-from bioparser_ft.fetch.cli import build_parser, run  # noqa: E402
-from bioparser_ft.fetch.landing import pdf_links_from_html, publisher_pdf_urls  # noqa: E402
-from bioparser_ft.fetch.matching import verify  # noqa: E402
-from bioparser_ft.fetch.net import PoliteClient  # noqa: E402
-from bioparser_ft.fetch.pdfcheck import check_pdf  # noqa: E402
+from bioparser_ft.fetch.citations import group_papers, parse_citation
+from bioparser_ft.fetch.cli import build_parser, run
+from bioparser_ft.fetch.landing import pdf_links_from_html, publisher_pdf_urls
+from bioparser_ft.fetch.matching import verify
+from bioparser_ft.fetch.net import PoliteClient
+from bioparser_ft.fetch.pdfcheck import check_pdf
 
 FILLER = " The study reports measurements of skull and body size for many specimens." * 6
 
@@ -83,20 +87,22 @@ def make_pdf(text: str, pad: int = 6000) -> bytes:
          "Khan", 2022, "Record of a pipistrelle from Pakistan", False),
     ],
 )  # fmt: skip
-def test_parse_citation_formats(citation, author, year, title_start, thesis):
+def test_parse_citation_formats(
+    citation: str, author: str, year: int | None, title_start: str, thesis: bool
+) -> None:
     a, y, title, is_thesis, _ = parse_citation(citation)
     assert (a, y, is_thesis) == (author, year, thesis)
     assert title.startswith(title_start), title
 
 
-def test_doi_in_citation():
+def test_doi_in_citation() -> None:
     *_, doi = parse_citation(
         "Dahal D.R, Thapa S. First records of a bat. J. Bat Res. DOI: 10.14709/BarbJ.15.1.2022.05."
     )
     assert doi == "10.14709/barbj.15.1.2022.05"
 
 
-def test_verify_levels():
+def test_verify_levels() -> None:
     cit = "Doe, J. and Roe, R., 2020. Echolocation calls of cave bats in northern Somewhere. J. Mamm., 1(2), pp.1-2."
     title = "Echolocation calls of cave bats in northern Somewhere"
     assert verify(cit, title, "Doe", 2020, title, 2020, ["Doe", "Roe"]).confidence == "high"
@@ -111,7 +117,7 @@ def test_verify_levels():
 
 
 # ----------------------------------------------------------------------- landing pages
-def test_pdf_links_from_html_priorities():
+def test_pdf_links_from_html_priorities() -> None:
     html = """<html><head>
       <meta name="citation_pdf_url" content="/content/article.pdf">
       <link rel="alternate" type="application/pdf" href="https://cdn.example.org/alt.pdf"></head><body>
@@ -126,7 +132,7 @@ def test_pdf_links_from_html_priorities():
     assert not any("about" in u or "javascript" in u for u in links)
 
 
-def test_bepress_and_figshare_links():
+def test_bepress_and_figshare_links() -> None:
     html = (
         '<meta name="bepress_citation_pdf_url" content="https://docs.lib.edu/cgi/viewcontent.cgi?article=1">'
         '<a href="https://hammer.example.edu/ndownloader/files/123">Download (2 MB)</a>'
@@ -138,7 +144,7 @@ def test_bepress_and_figshare_links():
     ]
 
 
-def test_publisher_patterns():
+def test_publisher_patterns() -> None:
     assert publisher_pdf_urls("10.1007/s42991-023-00001-1") == [
         "https://link.springer.com/content/pdf/10.1007/s42991-023-00001-1.pdf"
     ]
@@ -152,7 +158,7 @@ def test_publisher_patterns():
 
 
 # ----------------------------------------------------------------------- PDF file checks
-def test_check_pdf():
+def test_check_pdf() -> None:
     title = "Echolocation calls of cave bats in northern Somewhere"
     good = check_pdf(make_pdf(title + FILLER), title, "10.1000/a")
     assert good.is_pdf and good.verified and good.pages == 1 and good.title_recall == 1.0
@@ -173,7 +179,7 @@ TITLE_A = "Echolocation calls of cave bats in northern Somewhere"
 TITLE_B = "Skull morphology of field mice from Elsewhere"
 
 
-def _crossref_item(doi, title, family, year):
+def _crossref_item(doi: str, title: str, family: str, year: int) -> dict[str, Any]:
     return {"DOI": doi, "title": [title], "author": [{"family": family}], "issued": {"date-parts": [[year]]}}
 
 
@@ -230,8 +236,8 @@ def _setup(tmp_path: Path) -> Path:
     return tsv
 
 
-def _client(tmp_path: Path, calls: list) -> PoliteClient:
-    def handler(request):
+def _client(tmp_path: Path, calls: list[str]) -> PoliteClient:
+    def handler(request: httpx.Request) -> httpx.Response:
         calls.append(str(request.url))
         return fake_web(request)
 
@@ -244,7 +250,7 @@ def _client(tmp_path: Path, calls: list) -> PoliteClient:
     )
 
 
-def test_fetch_end_to_end(tmp_path: Path):
+def test_fetch_end_to_end(tmp_path: Path) -> None:
     tsv = _setup(tmp_path)
     out = tmp_path / "pdfs"
     args = build_parser().parse_args([
@@ -256,10 +262,12 @@ def test_fetch_end_to_end(tmp_path: Path):
     outcomes = {o.paper.key: o for o in run(args, client=_client(tmp_path, calls))}
 
     assert outcomes["Doe and Roe, 2020"].status == "downloaded"
-    assert outcomes["Doe and Roe, 2020"].got.source == "unpaywall"
+    doe = outcomes["Doe and Roe, 2020"].got
+    assert doe is not None and doe.source == "unpaywall"
     assert outcomes["Smith, 2021"].status == "downloaded"
     # The citation_pdf_url on the landing page of the DOI
-    assert outcomes["Smith, 2021"].got.source == "landing"
+    smith = outcomes["Smith, 2021"].got
+    assert smith is not None and smith.source == "landing"
     assert outcomes["Nobody, 2019"].status == "unresolved"  # The code refuses the incorrect Crossref result
     assert outcomes["Doe and Roe, 2020"].oa_status == "green"
     assert (out / "Doe and Roe, 2020.pdf").read_bytes().startswith(b"%PDF-")
@@ -283,7 +291,7 @@ def test_fetch_end_to_end(tmp_path: Path):
     assert calls == []
 
 
-def test_overrides_split_and_fix(tmp_path: Path):
+def test_overrides_split_and_fix(tmp_path: Path) -> None:
     tsv = _setup(tmp_path)
     ov = tmp_path / "doi_overrides.tsv"
     ov.write_text("tsv\tdoi\turl\tnote\nETS_Nobody, 2019.tsv\t10.1000/b\t\tfound by hand\n", encoding="utf-8")
@@ -310,7 +318,7 @@ class _Site(BaseHTTPRequestHandler):
         "/nothing.html": "<p>No PDF here</p>",
     }  # fmt: skip
 
-    def do_GET(self):
+    def do_GET(self) -> None:
         if self.path == "/files/paper.pdf":
             body = make_pdf("Echolocation calls of cave bats" + FILLER)
             self.send_response(200)
@@ -327,13 +335,13 @@ class _Site(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, *args):
+    def log_message(self, format: str, *args: Any) -> None:
         pass
 
 
 @pytest.mark.skipif(not CHROMIUM, reason="set BIOPARSER_CHROMIUM to a Chromium/Chrome binary")
 @pytest.mark.parametrize("page", ["/landing.html", "/js.html", "/meta.html"])
-def test_browser_auto_mode(tmp_path: Path, page: str):
+def test_browser_auto_mode(tmp_path: Path, page: str) -> None:
     pytest.importorskip("playwright")
     from bioparser_ft.fetch.browser import BrowserFetcher
 
@@ -350,7 +358,7 @@ def test_browser_auto_mode(tmp_path: Path, page: str):
 
 
 @pytest.mark.skipif(not CHROMIUM, reason="set BIOPARSER_CHROMIUM to a Chromium/Chrome binary")
-def test_browser_manual_mode_waits_and_times_out(tmp_path: Path):
+def test_browser_manual_mode_waits_and_times_out(tmp_path: Path) -> None:
     pytest.importorskip("playwright")
     from bioparser_ft.fetch.browser import BrowserFetcher
 
@@ -366,7 +374,7 @@ def test_browser_manual_mode_waits_and_times_out(tmp_path: Path):
         server.shutdown()
 
 
-def test_proxy_only_in_manual_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_proxy_only_in_manual_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The library terms do not let programs download articles automatically.
 
     Only the manual pass uses the proxy and the saved login. The headless pass uses an empty profile.
@@ -379,19 +387,19 @@ def test_proxy_only_in_manual_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     opened: list[tuple[bool, Path, str]] = []
 
     class FakeBrowser:
-        def __init__(self, *, profile_dir: Path, headless: bool, **kwargs):
+        def __init__(self, *, profile_dir: Path, headless: bool, **kwargs: object) -> None:
             self.profile_dir, self.headless = profile_dir, headless
 
-        def __enter__(self):
+        def __enter__(self) -> FakeBrowser:
             return self
 
-        def __exit__(self, *exc):
+        def __exit__(self, *exc: object) -> None:
             return None
 
-        def fetch_auto(self, url: str):
+        def fetch_auto(self, url: str) -> None:
             opened.append((self.headless, self.profile_dir, url))
 
-        def fetch_manual(self, url: str, label: str, timeout_s: float):
+        def fetch_manual(self, url: str, label: str, timeout_s: float) -> None:
             opened.append((self.headless, self.profile_dir, url))
 
     monkeypatch.setattr(browser, "BrowserFetcher", FakeBrowser)
@@ -410,14 +418,14 @@ def test_proxy_only_in_manual_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert manual_url == prefix + "https://doi.org/10.1000/a"
 
 
-def test_report_json_safe(tmp_path: Path):
+def test_report_json_safe(tmp_path: Path) -> None:
     """A report cell never contains a tab or a line break, so each paper has one row."""
     from bioparser_ft.fetch.cli import _cell
 
     assert _cell("a\tb\nc") == "a b c" and json.dumps(_cell(None)) == '""'
 
 
-def test_oa_candidates_parses_every_source(tmp_path: Path):
+def test_oa_candidates_parses_every_source(tmp_path: Path) -> None:
     """The code reads the correct fields from Unpaywall, OpenAlex, Europe PMC, Semantic Scholar and Crossref."""
     from bioparser_ft.fetch.scholarly import Scholarly
 
@@ -520,7 +528,7 @@ def test_oa_candidates_parses_every_source(tmp_path: Path):
 
 
 # ----------------------------------------------------------------------- concurrency
-def _args(tmp_path: Path, tsv: Path, *extra: str):
+def _args(tmp_path: Path, tsv: Path, *extra: str) -> argparse.Namespace:
     return build_parser().parse_args([
         "--tsv-dir", str(tsv), "--out-dir", str(tmp_path / "pdfs"), "--report", str(tmp_path / "report.tsv"),
         "--manifest", str(tmp_path / "manifest.tsv"), "--overrides", str(tmp_path / "none.tsv"),
@@ -529,7 +537,7 @@ def _args(tmp_path: Path, tsv: Path, *extra: str):
 
 
 @pytest.mark.parametrize("workers", ["1", "4"])
-def test_workers_give_the_same_results(tmp_path: Path, workers: str):
+def test_workers_give_the_same_results(tmp_path: Path, workers: str) -> None:
     """The papers run at the same time, but the results and the report sequence do not change."""
     tsv = _setup(tmp_path)
     outcomes = run(_args(tmp_path, tsv, "--workers", workers), client=_client(tmp_path, []))
@@ -542,12 +550,12 @@ def test_workers_give_the_same_results(tmp_path: Path, workers: str):
         assert [r["key"] for r in csv.DictReader(fh, delimiter="\t")] == [o.paper.key for o in outcomes]
 
 
-def test_error_in_one_paper_does_not_stop_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_error_in_one_paper_does_not_stop_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from bioparser_ft.fetch import cli
 
     real = cli.fetch_http
 
-    def fetch_http(client, sch, paper, res, info=None):
+    def fetch_http(client: Any, sch: Any, paper: Any, res: Any, info: dict[str, str] | None = None) -> Any:
         if paper.key.startswith("Smith"):
             raise RuntimeError("broken PDF parser")
         return real(client, sch, paper, res, info)
@@ -560,7 +568,7 @@ def test_error_in_one_paper_does_not_stop_the_run(tmp_path: Path, monkeypatch: p
     assert "broken PDF parser" in outcomes["Smith, 2021"].notes[0]
 
 
-def test_threads_share_the_rate_limit_of_a_host():
+def test_threads_share_the_rate_limit_of_a_host() -> None:
     """Two requests to one host start 0.1 s apart or more. Two different hosts do not wait for each other."""
     starts: dict[str, list[float]] = {}
     lock = threading.Lock()
@@ -580,7 +588,7 @@ def test_threads_share_the_rate_limit_of_a_host():
     assert abs(min(starts["a.example"]) - min(starts["b.example"])) < 0.15
 
 
-def test_server_rate_limit_and_retry_after():
+def test_server_rate_limit_and_retry_after() -> None:
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -599,7 +607,7 @@ def test_server_rate_limit_and_retry_after():
     assert calls.count("/busy") == 2 and max(slept) > 6  # The client waited for the Retry-After time
 
 
-def test_oa_candidates_parallel_stages_are_equal(tmp_path: Path):
+def test_oa_candidates_parallel_stages_are_equal(tmp_path: Path) -> None:
     """With a thread pool, the API calls of one stage go out at the same time. The batches do not change."""
     from bioparser_ft.fetch.scholarly import Scholarly
 
@@ -614,11 +622,11 @@ def test_oa_candidates_parallel_stages_are_equal(tmp_path: Path):
             return httpx.Response(200, json={"openAccessPdf": {"url": "https://s2.example/x.pdf"}})
         return httpx.Response(404)
 
-    def stages(pool):
+    def stages(pool: ThreadPoolExecutor | None) -> tuple[list[list[tuple[str, str]]], str]:
         client = PoliteClient(
             email="t@example.org", delay=0, transport=httpx.MockTransport(handler), sleep=lambda s: None
         )
-        info: dict = {}
+        info: dict[str, str] = {}
         sch = Scholarly(client, email="t@example.org", pool=pool)
         batches = [[(c.source, c.url) for c in b] for b in sch.oa_candidates("10.1000/x", info)]
         return batches, info["oa_status"]
@@ -628,7 +636,7 @@ def test_oa_candidates_parallel_stages_are_equal(tmp_path: Path):
     assert stages(None)[1] == "green"
 
 
-def test_headless_pass_uses_parallel_browsers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_headless_pass_uses_parallel_browsers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Each headless browser has its own thread and its own empty profile."""
     from bioparser_ft.fetch import browser
     from bioparser_ft.fetch.citations import Paper
@@ -639,16 +647,16 @@ def test_headless_pass_uses_parallel_browsers(tmp_path: Path, monkeypatch: pytes
     lock = threading.Lock()
 
     class FakeBrowser:
-        def __init__(self, *, profile_dir: Path, headless: bool, **kwargs):
+        def __init__(self, *, profile_dir: Path, headless: bool, **kwargs: object) -> None:
             self.profile_dir = profile_dir
 
-        def __enter__(self):
+        def __enter__(self) -> FakeBrowser:
             return self
 
-        def __exit__(self, *exc):
+        def __exit__(self, *exc: object) -> None:
             return None
 
-        def fetch_auto(self, url: str):
+        def fetch_auto(self, url: str) -> None:
             with lock:
                 seen.add((threading.get_ident(), self.profile_dir))
             time.sleep(0.05)  # The other threads take the next papers in this time
@@ -667,9 +675,10 @@ def test_headless_pass_uses_parallel_browsers(tmp_path: Path, monkeypatch: pytes
 
 
 @pytest.mark.skipif(not CHROMIUM, reason="set BIOPARSER_CHROMIUM to a Chromium/Chrome binary")
-def test_parallel_headless_pass_with_chromium(tmp_path: Path):
+def test_parallel_headless_pass_with_chromium(tmp_path: Path) -> None:
     """Two real browsers, each in its own thread with its own Playwright, get four PDF files."""
     pytest.importorskip("playwright")
+    assert CHROMIUM is not None
     from bioparser_ft.fetch.citations import Paper
     from bioparser_ft.fetch.cli import Outcome, browser_pass
     from bioparser_ft.fetch.scholarly import Resolution
@@ -698,7 +707,7 @@ def test_parallel_headless_pass_with_chromium(tmp_path: Path):
     assert not (tmp_path / "profile").exists()
 
 
-def test_rate_limit_applies_to_each_redirect_hop():
+def test_rate_limit_applies_to_each_redirect_hop() -> None:
     """doi.org only sends redirects. The publisher after the redirect keeps its own rate limit."""
     starts: dict[str, list[float]] = {}
     lock = threading.Lock()
@@ -713,7 +722,7 @@ def test_rate_limit_applies_to_each_redirect_hop():
     client = PoliteClient(delay=0.3, transport=httpx.MockTransport(handler))
     with ThreadPoolExecutor(max_workers=3) as pool:
         pages = list(pool.map(client.get_web, [f"https://doi.org/10.1000/{i}" for i in range(3)]))
-    assert [p.url for p in pages] == [f"https://pub.example/10.1000/{i}" for i in range(3)]
+    assert [p.url for p in pages if p is not None] == [f"https://pub.example/10.1000/{i}" for i in range(3)]
     for host, gap in (("doi.org", 0.18), ("pub.example", 0.28)):
         t = sorted(starts[host])
         assert all(later - earlier >= gap for earlier, later in itertools.pairwise(t)), host

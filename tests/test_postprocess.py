@@ -37,11 +37,11 @@ from bioparser_ft.schema import ETS_COLUMNS, MODEL_COLUMNS
         ("", ""),
     ],
 )
-def test_infer_taxon_rank(name: str, rank: str):
+def test_infer_taxon_rank(name: str, rank: str) -> None:
     assert infer_taxon_rank(name) == rank
 
 
-def test_expand_abbreviated_genera():
+def test_expand_abbreviated_genera() -> None:
     recs = [{"verbatimScientificName": n} for n in ("Myotis ater", "M. ater", "Murina sp.", "R. ferrum")]
     # "M." is ambiguous (Myotis, Murina) -> untouched; "R." has no spelled-out genus
     assert expand_abbreviated_genera(recs) == 0
@@ -50,13 +50,13 @@ def test_expand_abbreviated_genera():
     assert recs[1]["verbatimScientificName"] == "Homo neanderthalensis"
 
 
-def _model_output(*rows: dict) -> str:
+def _model_output(*rows: dict[str, str]) -> str:
     lines = ["\t".join(MODEL_COLUMNS)]
     lines += ["\t".join(r.get(c, "") for c in MODEL_COLUMNS) for r in rows]
     return "\n".join(lines)
 
 
-def test_to_ets_records_fills_deterministic_columns():
+def test_to_ets_records_fills_deterministic_columns() -> None:
     text = _model_output(
         {
             "references": "Cit.",
@@ -81,13 +81,13 @@ def test_to_ets_records_fills_deterministic_columns():
     assert {r["references"] for r in override.records} == {"Verified citation."}
 
 
-def test_to_ets_records_bad_output_never_raises():
+def test_to_ets_records_bad_output_never_raises() -> None:
     res = to_ets_records("I could not find any traits.", complete=False)
     assert isinstance(res.records, list)
     assert res.warnings and not res.complete
 
 
-def test_json_round_trip():
+def test_json_round_trip() -> None:
     res = to_ets_records(_model_output({"references": "C.", "verbatimScientificName": "Mus spretus"}))
     payload = json.loads(res.to_json())
     assert payload["complete"] is True and payload["records"][0]["author"] == "BioParser"
