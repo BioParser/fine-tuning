@@ -1,0 +1,2078 @@
+diff --git a/.gitattributes b/.gitattributes
+new file mode 100644
+index 0000000000000000000000000000000000000000..6e5fb1344302442c16c3c889d327b0c2c4ede827
+--- /dev/null
++++ b/.gitattributes
+@@ -0,0 +1,6 @@
++* text=auto eol=lf
++*.pdf binary
++*.zip binary
++
++# Generated: GitHub collapses this file in pull request diffs.
++uv.lock linguist-generated=true
+diff --git a/.github/actions/setup/action.yml b/.github/actions/setup/action.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..38f1f3d29cd7bb4ecbe4b18591ff0522f5ae34d2
+--- /dev/null
++++ b/.github/actions/setup/action.yml
+@@ -0,0 +1,23 @@
++name: Setup Python
++description: Install the pinned uv, Python 3.13, and the locked dev and fetch groups. Not the GPU stack.
++
++runs:
++  using: composite
++  steps:
++    - name: Install uv
++      uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
++      with:
++        # Keep in sync with the uv-pre-commit rev in .pre-commit-config.yaml.
++        version: "0.13.4"
++        enable-cache: true
++
++    - name: Set up Python
++      shell: bash
++      run: uv python install
++
++    - name: Install dependencies
++      shell: bash
++      # Only the dev and fetch groups. The project dependencies are the GPU training stack
++      # (torch, Unsloth): several GB, and the runners have no GPU. The tests import the
++      # package from src/ (pythonpath in pyproject.toml).
++      run: uv sync --locked --only-group dev --only-group fetch
+diff --git a/.github/dependabot.yml b/.github/dependabot.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..a93cb3215aee138456ee385fac9801ccda309165
+--- /dev/null
++++ b/.github/dependabot.yml
+@@ -0,0 +1,60 @@
++version: 2
++updates:
++  - package-ecosystem: "github-actions"
++    directories:
++      - "/"
++      - "/.github/actions/setup"
++    schedule:
++      interval: "weekly"
++    commit-message:
++      prefix: "CI"
++    cooldown:
++      default-days: 7
++    groups:
++      github-actions:
++        patterns:
++          - "*"
++
++  - package-ecosystem: "pre-commit"
++    directory: "/"
++    schedule:
++      interval: "weekly"
++    commit-message:
++      prefix: "CI"
++    cooldown:
++      default-days: 7
++    ignore:
++      # This rev is the uv release CI pins by hand. Bump both manually.
++      - dependency-name: "https://github.com/astral-sh/uv-pre-commit"
++    groups:
++      pre-commit-hooks:
++        patterns:
++          - "*"
++
++  - package-ecosystem: "uv"
++    directory: "/"
++    schedule:
++      interval: "weekly"
++    commit-message:
++      prefix: "build"
++      include: "scope"
++    cooldown:
++      default-days: 7
++    ignore:
++      # The GPU training stack is pinned to the combination that ran on the RTX 2060. CI has no
++      # GPU, so it cannot test an update. Update these packages by hand, and test on a GPU.
++      - dependency-name: "accelerate"
++      - dependency-name: "bitsandbytes"
++      - dependency-name: "datasets"
++      - dependency-name: "peft"
++      - dependency-name: "torch"
++      - dependency-name: "torchao"
++      - dependency-name: "transformers"
++      - dependency-name: "trl"
++      - dependency-name: "unsloth"
++      - dependency-name: "unsloth-zoo"
++    groups:
++      uv-minor-patch:
++        update-types:
++          - "minor"
++          - "patch"
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..82de96c5a6c06809e15646f1fe255ef3142a8c21
+--- /dev/null
++++ b/.github/workflows/ci.yml
+@@ -0,0 +1,97 @@
++name: GitHub CI
++
++on:
++  push:
++    branches: [main]
++  pull_request:
++
++concurrency:
++  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
++  cancel-in-progress: true
++
++permissions:
++  contents: read # to fetch code (actions/checkout)
++
++env:
++  # The setup action installs only the dev and fetch groups. Without this, each `uv run` would
++  # first install the full GPU training stack.
++  UV_NO_SYNC: "1"
++
++jobs:
++  lint:
++    name: Lint and format
++    runs-on: ubuntu-latest
++
++    steps:
++      - name: Checkout
++        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++
++      - name: Setup Python
++        uses: ./.github/actions/setup
++
++      - name: Ruff lint
++        run: uv run ruff check .
++
++      - name: Ruff format
++        run: uv run ruff format --check .
++
++      # The same hooks as in .pre-commit-config.yaml. A person can skip the local hooks.
++      - name: No client data or model weights in git
++        run: uv run pre-commit run no-client-data --all-files
++
++      - name: No tokens or private keys in git
++        run: uv run pre-commit run no-secrets --all-files
++
++  typecheck:
++    name: Type check
++    runs-on: ubuntu-latest
++
++    steps:
++      - name: Checkout
++        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++
++      - name: Setup Python
++        uses: ./.github/actions/setup
++
++      - name: mypy
++        run: uv run mypy
++
++  test-unit:
++    name: Unit tests (${{ matrix.os }})
++    runs-on: ${{ matrix.os }}
++    continue-on-error: ${{ matrix.os != 'ubuntu-latest' }} # Win64/Ubuntu arm failure wont fail run for Ubuntu x64
++    strategy:
++      fail-fast: false
++      matrix:
++        os: [ubuntu-latest, ubuntu-26.04-arm, windows-latest]
++
++    steps:
++      - name: Checkout
++        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++
++      - name: Setup Python
++        uses: ./.github/actions/setup
++
++      # The browser tests skip here: BIOPARSER_CHROMIUM is not set.
++      - name: Run unit tests
++        run: uv run pytest
++
++  test-browser:
++    name: Browser tests
++    runs-on: ubuntu-latest
++
++    steps:
++      - name: Checkout
++        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++
++      - name: Setup Python
++        uses: ./.github/actions/setup
++
++      - name: Install Chromium
++        run: uv run playwright install --with-deps chromium
++
++      - name: Run the fetch tests with Chromium
++        run: |
++          BIOPARSER_CHROMIUM="$(uv run python -c 'from playwright.sync_api import sync_playwright as s; p = s().start(); print(p.chromium.executable_path); p.stop()')"
++          export BIOPARSER_CHROMIUM
++          uv run pytest tests/test_fetch.py
+diff --git a/.pre-commit-config.yaml b/.pre-commit-config.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..32013f383af4a7839efafd22345c6373f3d61e19
+--- /dev/null
++++ b/.pre-commit-config.yaml
+@@ -0,0 +1,60 @@
++# In order to install this hook run `uv run pre-commit install`
++default_install_hook_types:
++  - pre-commit
++repos:
++  - repo: https://github.com/astral-sh/uv-pre-commit
++    # uv 0.13.4. Keep in sync with .github/actions/setup/action.yml.
++    rev: "dd409d04a3fa4a50f918dddb3ad3c6d8f46ab2cd"
++    hooks:
++      - id: uv-lock
++
++  # --only-group: the hooks do not install the GPU training stack (torch, Unsloth).
++  - repo: local
++    hooks:
++      - id: ruff-check
++        name: ruff check
++        entry: uv run --locked --only-group dev ruff check
++        language: system
++        types_or: [python, jupyter]
++
++      - id: ruff-format
++        name: ruff format
++        entry: uv run --locked --only-group dev ruff format
++        language: system
++        # ruff also formats the notebooks and the Python code blocks in Markdown files. CI checks them.
++        types_or: [python, jupyter, markdown]
++
++      - id: mypy
++        name: mypy
++        entry: uv run --locked --only-group dev --only-group fetch mypy
++        language: system
++        types: [python]
++        pass_filenames: false
++
++      - id: notebooks-clean
++        name: notebooks have no outputs
++        entry: uv run --locked --only-group dev pytest -q --no-header tests/test_notebook_clean.py
++        language: system
++        files: \.ipynb$
++        pass_filenames: false
++
++      # CI runs this hook and the next one on all files.
++      - id: no-client-data
++        name: no client data or model weights
++        entry: Client data, PDF files and model weights must not be in git. Remove these files from the commit.
++        language: fail
++        files: |
++          (?x)^(
++              fine_tuning_data/(?!README\.md$|manifest\.example\.tsv$).*
++            | data/.*
++            | outputs/.*
++            | lora_model/.*
++            | unsloth_compiled_cache/.*
++            | .*\.(pdf|safetensors|gguf|pt|pth|ckpt)
++          )$
++
++      - id: no-secrets
++        name: no tokens or private keys
++        entry: '(hf_[A-Za-z0-9]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'
++        language: pygrep
++        exclude: ^\.pre-commit-config\.yaml$
+diff --git a/README.md b/README.md
+index 06687b8a6f6aec300a8733cf778d8a156d2fb3e6..d23a94b0632978106a59ee9af0f18936d7b62d60 100644
+--- a/README.md
++++ b/README.md
+@@ -239,7 +239,8 @@ def parse(req: ParseRequest) -> dict:  # A sync function: FastAPI runs it in a w
+     with gpu:
+         gen = generate_tsv(model, processor, req.markdown, max_new_tokens=8192, max_seq_length=32768)
+     result = to_ets_records(gen.text, references=req.references, complete=gen.complete)
+-    return json.loads(result.to_json())  # {"records": [...20 ETS columns...], "warnings": [...], "complete": bool}
++    # {"records": [...20 ETS columns...], "warnings": [...], "complete": bool}
++    return json.loads(result.to_json())
+ ```
+ 
+ For vLLM, export a merged 16-bit model with `bioparser-train --merge-16bit`. Then use one of the
+@@ -293,6 +294,8 @@ only on your computer.
+   `markdown.md`, in memory and with a size limit. The tools do not extract files to the disk.
+ - Commit notebooks without outputs. The test `tests/test_notebook_clean.py` makes sure that the
+   notebooks have no outputs.
++- The Git hooks and CI stop a commit with client data, PDF files, model weights or tokens. For
++  more information, refer to [Checks before a commit and in CI](#checks-before-a-commit-and-in-ci).
+ 
+ ## Tests
+ 
+@@ -311,3 +314,44 @@ only on your computer.
+ The tests with client files make sure that the tools read all 181 TSV files with 50,060 records.
+ They also make sure that each record goes through the model TSV format without changes. They
+ also compare the `taxonRank` rule with the client labels.
++
++## Checks before a commit and in CI
++
++The checks are the same as in the [bioparser](https://github.com/bioparser/bioparser) repository.
++Install the Git hooks one time:
++
++```bash
++uv run pre-commit install
++```
++
++Before each commit, the hooks do these checks:
++
++- `uv-lock` makes sure that `uv.lock` agrees with `pyproject.toml`.
++- `ruff check`, `ruff format` and `mypy` examine the Python files. mypy uses the strict mode.
++- The notebooks must have no outputs.
++- Git must not get client data, PDF files, model weights, Hugging Face tokens or private keys.
++
++To do all checks on all files, use this command:
++
++```bash
++uv run pre-commit run --all-files
++```
++
++The GitHub Actions workflow `.github/workflows/ci.yml` does these checks for each pull request
++and for each push to `main`:
++
++| Job | Checks |
++|---|---|
++| Lint and format | `ruff check`, `ruff format --check`, and the checks for client data and tokens |
++| Type check | `mypy` in strict mode |
++| Unit tests | `pytest` on Ubuntu x64, Ubuntu ARM and Windows. Only an error on Ubuntu x64 stops the run. |
++| Browser tests | The tests of `bioparser-fetch-pdfs` with Chromium |
++
++CI does not install the GPU training stack, for example torch and Unsloth. The GitHub runners
++have no GPU, and the stack uses many GB of disk space. For this reason, CI installs only the groups `dev` and `fetch`, and
++the tests import the package from `src/`. Test changes to the training code on a computer with a
++GPU.
++
++Dependabot updates the GitHub Actions, the hooks and the Python packages each week. It does not
++update the GPU training stack, because CI cannot test it. CI uses uv 0.13.4. To get the same
++version or a newer one, use `uv self update`.
+diff --git a/pyproject.toml b/pyproject.toml
+index d5e99a96d294fd69410ab1a1a7c6bb1feaa49d8a..161b9623462aba62762ff9556342650803be45d5 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -29,7 +29,8 @@ dependencies = [
+ ]
+ 
+ [dependency-groups]
+-dev = ["pytest>=8.3", "ruff>=0.12"]
++# The same minimum versions as the bioparser repository
++dev = ["mypy>=2.3.1", "pre-commit>=4.6.2", "pytest>=9.1.1", "ruff>=0.16.5"]
+ # "lab" (previously listed) is an unrelated benchmark-experiment framework on PyPI,
+ # not JupyterLab.
+ notebook = ["jupyterlab>=4.4", "ipykernel>=6.29", "ipywidgets>=8.1"]
+@@ -44,7 +45,7 @@ bioparser-evaluate = "bioparser_ft.evaluate:main"
+ bioparser-fetch-pdfs = "bioparser_ft.fetch.cli:main"
+ 
+ [build-system]
+-requires = ["uv_build>=0.12.19,<0.13.0"]
++requires = ["uv_build>=0.12.19,<0.14.0"]
+ build-backend = "uv_build"
+ 
+ [tool.uv]
+@@ -55,6 +56,10 @@ module-name = "bioparser_ft"
+ 
+ [tool.pytest.ini_options]
+ testpaths = ["tests"]
++# CI does not install the package, because its dependencies are the GPU training stack.
++# For this reason, the tests import the package from src/.
++pythonpath = ["src"]
++addopts = "-ra"
+ 
+ [tool.ruff]
+ line-length = 110
+@@ -63,3 +68,29 @@ target-version = "py313"
+ [tool.ruff.lint]
+ select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ ignore = ["E501", "RUF001", "RUF002", "RUF003"] # long lines in prompt text; Unicode in docs is intended
++
++[tool.mypy]
++python_version = "3.13"
++strict = true
++files = ["src", "tests"]
++mypy_path = "src,tests"
++explicit_package_bases = true
++
++[[tool.mypy.overrides]]
++# The GPU training stack. CI does not install it, and some of these packages have no type hints.
++# follow_imports = "skip" gives the same result on a computer that has the stack.
++module = [
++    "accelerate.*",
++    "bitsandbytes.*",
++    "datasets.*",
++    "huggingface_hub.*",
++    "peft.*",
++    "tokenizers.*",
++    "torch.*",
++    "transformers.*",
++    "trl.*",
++    "unsloth.*",
++    "unsloth_zoo.*",
++]
++ignore_missing_imports = true
++follow_imports = "skip"
+diff --git a/src/bioparser_ft/build_dataset.py b/src/bioparser_ft/build_dataset.py
+index 2dacb6d313e91e7bf4c4b12b42d9a35843fa3821..64382f03e6c6b1d282840e09b838f808d6072e53 100644
+--- a/src/bioparser_ft/build_dataset.py
++++ b/src/bioparser_ft/build_dataset.py
+@@ -26,6 +26,7 @@ from collections import defaultdict
+ from collections.abc import Sequence
+ from dataclasses import asdict, dataclass
+ from pathlib import Path
++from typing import Any
+ 
+ from .coverage import label_coverage
+ from .linking import link
+@@ -82,14 +83,14 @@ def build(
+     min_coverage: float = 0.5,
+     min_name_coverage: float = 0.5,
+     salt: str = "bioparser-split-v1",
+-) -> dict:
++) -> dict[str, Any]:
+     if manifest is None:
+         # The fetch command writes fine_tuning_data/manifest.tsv. Use it when it is there.
+         default = tsv_dir.parent / "manifest.tsv"
+         manifest = default if default.is_file() else None
+     linked = link(tsv_dir, markdown_dir, manifest)
+     infos: list[ExampleInfo] = []
+-    rows_by_split: dict[str, list[dict]] = {s: [] for s in SPLITS}
++    rows_by_split: dict[str, list[dict[str, Any]]] = {s: [] for s in SPLITS}
+     citation_owner: dict[str, str] = {}
+     cross_pair_citations: list[str] = []
+ 
+@@ -111,7 +112,7 @@ def build(
+         reason = None
+         if not records:
+             reason = "no label rows"
+-        elif cov.values_total >= MIN_VALUES_TO_JUDGE:
++        elif cov.value_ratio is not None and cov.values_total >= MIN_VALUES_TO_JUDGE:
+             if cov.value_ratio < min_coverage:
+                 reason = f"value coverage {cov.value_ratio:.0%} < {min_coverage:.0%}"
+         # Names are a weaker signal (curators may update taxonomy), so they decide only
+@@ -184,7 +185,7 @@ def build(
+     return report
+ 
+ 
+-def _print_summary(report: dict, out_dir: Path) -> None:
++def _print_summary(report: dict[str, Any], out_dir: Path) -> None:
+     c = report["counts"]
+     if report.get("manifest"):
+         print(f"manifest: {report['manifest']}")
+diff --git a/src/bioparser_ft/chat.py b/src/bioparser_ft/chat.py
+index 51ea54869e35b4025992274f2bc1c7d4955e618c..1ec17aa22cc9d05ccdb26be464c52225420e4502 100644
+--- a/src/bioparser_ft/chat.py
++++ b/src/bioparser_ft/chat.py
+@@ -68,7 +68,7 @@ def render_training_text(processing_class: Any, messages: Sequence[Message]) ->
+     """Prompt + target TSV + EOS. Ends exactly with EOS, so TRL does not append a second one."""
+     if messages[-1]["role"] != "assistant":
+         raise ValueError("training messages must end with the assistant turn")
+-    eos = text_tokenizer(processing_class).eos_token
++    eos: str = text_tokenizer(processing_class).eos_token
+     return render_prompt(processing_class, messages) + messages[-1]["content"] + eos
+ 
+ 
+diff --git a/src/bioparser_ft/coverage.py b/src/bioparser_ft/coverage.py
+index 725abf7eb0c81e2022aa4b393fd3665b446dc245..e89adf245bb29b02f8ded791380dd11b29130b35 100644
+--- a/src/bioparser_ft/coverage.py
++++ b/src/bioparser_ft/coverage.py
+@@ -56,7 +56,7 @@ def numbers_in(text: str, *, min_value: int = 10) -> set[str]:
+ 
+ def _name_key(name: str) -> str:
+     """Most specific lower-case epithet of a name (genus if there is none)."""
+-    words = [w for w in re.findall(r"[A-Za-z]+", name)]
++    words: list[str] = re.findall(r"[A-Za-z]+", name)
+     epithets = [w.casefold() for w in words[1:] if w.islower() and w.casefold() not in _NAME_STOPWORDS]
+     if epithets:
+         return epithets[-1]
+diff --git a/src/bioparser_ft/evaluate.py b/src/bioparser_ft/evaluate.py
+index 9bfad546a854cd28f4c6308818da8fb7a771077b..c5cba1bfedbb63116fa689ae3587c3e65e10dc77 100644
+--- a/src/bioparser_ft/evaluate.py
++++ b/src/bioparser_ft/evaluate.py
+@@ -21,6 +21,7 @@ from collections import Counter
+ from collections.abc import Iterable, Mapping, Sequence
+ from decimal import Decimal, InvalidOperation
+ from pathlib import Path
++from typing import Any
+ 
+ from .coverage import VALUE_COLUMNS
+ from .schema import DOCUMENT_COLUMNS, MODEL_COLUMNS
+@@ -46,8 +47,8 @@ def _prf(tp: int, n_pred: int, n_gold: int) -> dict[str, float]:
+     return {"precision": precision, "recall": recall, "f1": f1}
+ 
+ 
+-def _facts(records: Iterable[Mapping[str, str]], columns: Sequence[str]) -> Counter:
+-    facts: Counter = Counter()
++def _facts(records: Iterable[Mapping[str, str]], columns: Sequence[str]) -> Counter[tuple[str, ...]]:
++    facts: Counter[tuple[str, ...]] = Counter()
+     for r in records:
+         key = tuple(_norm(r.get(c, "")) for c in KEY_COLUMNS)
+         for col in columns:
+@@ -56,11 +57,11 @@ def _facts(records: Iterable[Mapping[str, str]], columns: Sequence[str]) -> Coun
+     return facts
+ 
+ 
+-def score_document(pred: Sequence[Mapping[str, str]], gold: Sequence[Mapping[str, str]]) -> dict:
++def score_document(pred: Sequence[Mapping[str, str]], gold: Sequence[Mapping[str, str]]) -> dict[str, Any]:
+     """Counts (tp, n_pred, n_gold) per metric for one article."""
+     rows_p = Counter(tuple(_norm(r.get(c, "")) for c in SCORED_COLUMNS) for r in pred)
+     rows_g = Counter(tuple(_norm(r.get(c, "")) for c in SCORED_COLUMNS) for r in gold)
+-    out: dict = {}
++    out: dict[str, Any] = {}
+     for name, p, g in (
+         ("row", rows_p, rows_g),
+         ("cell", _facts(pred, SCORED_COLUMNS), _facts(gold, SCORED_COLUMNS)),
+@@ -74,8 +75,8 @@ def score_document(pred: Sequence[Mapping[str, str]], gold: Sequence[Mapping[str
+     return out
+ 
+ 
+-def aggregate(doc_scores: Sequence[dict]) -> dict:
+-    result: dict = {"documents": len(doc_scores)}
++def aggregate(doc_scores: Sequence[dict[str, Any]]) -> dict[str, Any]:
++    result: dict[str, Any] = {"documents": len(doc_scores)}
+     for name in METRICS:
+         tp = sum(d[name][0] for d in doc_scores)
+         n_pred = sum(d[name][1] for d in doc_scores)
+@@ -88,12 +89,12 @@ def aggregate(doc_scores: Sequence[dict]) -> dict:
+     return result
+ 
+ 
+-def _read_jsonl(path: Path) -> list[dict]:
++def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+     with path.open(encoding="utf-8") as fh:
+         return [json.loads(line) for line in fh if line.strip()]
+ 
+ 
+-def evaluate_files(dataset: Path, predictions: Path) -> dict:
++def evaluate_files(dataset: Path, predictions: Path) -> dict[str, Any]:
+     gold = {ex["id"]: ex for ex in _read_jsonl(dataset)}
+     docs, per_doc = [], {}
+     for pred in _read_jsonl(predictions):
+diff --git a/src/bioparser_ft/fetch/cli.py b/src/bioparser_ft/fetch/cli.py
+index a832eb1dd253422e416c9e41f71201e9ea2dc5f4..a728299ac43ce4f43307bea847ed0b2377b4c1c7 100644
+--- a/src/bioparser_ft/fetch/cli.py
++++ b/src/bioparser_ft/fetch/cli.py
+@@ -39,7 +39,7 @@ import re
+ import tempfile
+ import threading
+ from collections import Counter
+-from collections.abc import Iterator, Sequence
++from collections.abc import Iterator, Mapping, Sequence
+ from concurrent.futures import ThreadPoolExecutor, as_completed
+ from dataclasses import dataclass, field
+ from pathlib import Path
+@@ -123,7 +123,7 @@ def fetch_candidate(
+             continue
+         source = cand.source if cand.kind == "pdf" else "landing"
+         best = _better(best, Got(page.body, page.url, source, check_pdf(page.body, title, doi)))
+-        if best.check.verified:
++        if best is not None and best.check.verified:
+             break
+     if best is None:
+         notes.append(f"{cand.source}: no PDF link on {fetched.url[:90]}")
+@@ -131,7 +131,7 @@ def fetch_candidate(
+ 
+ 
+ def fetch_http(
+-    client: PoliteClient, sch: Scholarly, paper: Paper, res: Resolution, info: dict | None = None
++    client: PoliteClient, sch: Scholarly, paper: Paper, res: Resolution, info: dict[str, str] | None = None
+ ) -> tuple[Got | None, list[str]]:
+     """Use the candidates one batch at a time, and stop at the first verified PDF.
+ 
+@@ -231,7 +231,12 @@ def browser_pass(
+ 
+ 
+ def _browser_worker(
+-    todo: queue.SimpleQueue, total: int, args: argparse.Namespace, *, manual: bool, stop: threading.Event
++    todo: queue.SimpleQueue[tuple[int, Outcome]],
++    total: int,
++    args: argparse.Namespace,
++    *,
++    manual: bool,
++    stop: threading.Event,
+ ) -> None:
+     """Get the papers from the queue, one at a time, with one browser. Each thread has its own browser."""
+     from .browser import BrowserFetcher
+@@ -293,7 +298,7 @@ def _read_report(path: Path) -> dict[str, dict[str, str]]:
+ 
+ def write_report(path: Path, outcomes: list[Outcome]) -> None:
+     previous = _read_report(path)
+-    rows = []
++    rows: list[Mapping[str, object]] = []
+     for oc in outcomes:
+         if oc.status == "exists" and oc.paper.key in previous:
+             rows.append(previous[oc.paper.key] | {"status": "exists"})
+@@ -391,7 +396,7 @@ def process_paper(paper: Paper, client: PoliteClient, sch: Scholarly, args: argp
+     elif args.resolve_only:
+         oc.status = "resolved"
+     else:
+-        info: dict = {}
++        info: dict[str, str] = {}
+         got, notes = fetch_http(client, sch, paper, res, info)
+         oc.oa_status = info.get("oa_status", "")
+         oc.notes += notes[-8:]
+diff --git a/src/bioparser_ft/fetch/landing.py b/src/bioparser_ft/fetch/landing.py
+index ff3113fa57f1de4f67fc558222098b9c9bf94086..6fdca8ef14e676cd8e2b11145f06337f1cd8cf1b 100644
+--- a/src/bioparser_ft/fetch/landing.py
++++ b/src/bioparser_ft/fetch/landing.py
+@@ -6,9 +6,10 @@ It also knows the PDF URL patterns of some publishers.
+ from __future__ import annotations
+ 
+ import re
++from typing import Any
+ from urllib.parse import urljoin, urlsplit
+ 
+-from bs4 import BeautifulSoup
++from bs4 import BeautifulSoup, Tag
+ 
+ # Meta tags with the PDF URL: Highwire Press tags (most publishers, OJS and DSpace),
+ # bepress Digital Commons and EPrints.
+@@ -25,24 +26,34 @@ _DEPRIORITISE = re.compile(
+ )
+ 
+ 
++def _attr(tag: Tag, name: str) -> str:
++    """Return the attribute as one string. bs4 gives a list for attributes with more than one value."""
++    value = tag.get(name)
++    if isinstance(value, list):
++        return " ".join(value)
++    return value or ""
++
++
+ def pdf_links_from_html(html: str | bytes, base_url: str, limit: int = 12) -> list[str]:
+     """Return the PDF URLs of an HTML page. The best URLs come first: the meta tags, then the links."""
+     soup = BeautifulSoup(html, "html.parser")
+-    meta, links, weak = [], [], []
++    meta: list[str] = []
++    links: list[str] = []
++    weak: list[str] = []
+     for m in soup.find_all("meta"):
+-        name = (m.get("name") or m.get("property") or "").strip().lower()
+-        if name in PDF_META and m.get("content"):
+-            meta.append(urljoin(base_url, m["content"].strip()))
++        name = (_attr(m, "name") or _attr(m, "property")).strip().lower()
++        if name in PDF_META and _attr(m, "content"):
++            meta.append(urljoin(base_url, _attr(m, "content").strip()))
+     for link in soup.find_all("link", href=True):
+-        if "pdf" in (link.get("type") or "").lower():
+-            links.append(urljoin(base_url, link["href"]))
++        if "pdf" in _attr(link, "type").lower():
++            links.append(urljoin(base_url, _attr(link, "href")))
+     for a in soup.find_all("a", href=True):
+-        href = a["href"].strip()
++        href = _attr(a, "href").strip()
+         low = href.lower()
+         if low.startswith(("javascript:", "mailto:", "#", "tel:")):
+             continue
+         text = " ".join(a.get_text(" ", strip=True).split()).lower()[:80]
+-        label = " ".join([text, (a.get("title") or "").lower(), (a.get("aria-label") or "").lower()])
++        label = " ".join([text, _attr(a, "title").lower(), _attr(a, "aria-label").lower()])
+         path = urlsplit(low).path
+         looks_pdf = (
+             path.endswith(".pdf")
+@@ -56,7 +67,8 @@ def pdf_links_from_html(html: str | bytes, base_url: str, limit: int = 12) -> li
+         if looks_pdf:
+             url = urljoin(base_url, href)
+             (weak if _DEPRIORITISE.search(low + " " + label) else links).append(url)
+-    out, seen = [], set()
++    out: list[str] = []
++    seen: set[str] = set()
+     for url in meta + links + weak:
+         if url not in seen and urlsplit(url).scheme in ("http", "https"):
+             seen.add(url)
+@@ -68,7 +80,7 @@ _PLOS = {"pone": "plosone", "pbio": "plosbiology", "pcbi": "ploscompbiol", "pgen
+          "ppat": "plospathogens", "pntd": "plosntds", "pmed": "plosmedicine"}  # fmt: skip
+ 
+ 
+-def publisher_pdf_urls(doi: str, crossref_item: dict | None = None) -> list[str]:
++def publisher_pdf_urls(doi: str, crossref_item: dict[str, Any] | None = None) -> list[str]:
+     """Return the direct PDF URLs that publishers use for open-access articles."""
+     d = doi.lower()
+     prefix, _, suffix = d.partition("/")
+diff --git a/src/bioparser_ft/fetch/net.py b/src/bioparser_ft/fetch/net.py
+index ec42fc50460068279a9ddf96551a1701db178b10..0954373f6c3cf4cb1143c1c972c7f3171f38f8b7 100644
+--- a/src/bioparser_ft/fetch/net.py
++++ b/src/bioparser_ft/fetch/net.py
+@@ -137,7 +137,7 @@ class PoliteClient:
+         with self._lock:
+             self._next[host] = max(self._next.get(host, 0.0), time.monotonic() + seconds)
+ 
+-    def _slot(self, host: str) -> contextlib.AbstractContextManager:
++    def _slot(self, host: str) -> contextlib.AbstractContextManager[object]:
+         if host in RESOLVERS:
+             return contextlib.nullcontext()  # A redirect is fast: the publisher limits the open requests
+         with self._lock:
+@@ -154,7 +154,14 @@ class PoliteClient:
+                 self._server_delay[host] = float(interval.group(1)) / int(limit)
+ 
+     # ------------------------------------------------------------------ internal functions
+-    def _request(self, url: str, *, params=None, headers=None, attempts: int = 3) -> httpx.Response | None:
++    def _request(
++        self,
++        url: str,
++        *,
++        params: dict[str, Any] | None = None,
++        headers: dict[str, str] | None = None,
++        attempts: int = 3,
++    ) -> httpx.Response | None:
+         host = host_of(httpx.URL(url))
+         for attempt in range(attempts):
+             try:
+@@ -175,7 +182,7 @@ class PoliteClient:
+             return resp
+         return None
+ 
+-    def _cache_path(self, url: str, params: dict | None) -> Path | None:
++    def _cache_path(self, url: str, params: dict[str, Any] | None) -> Path | None:
+         if self.cache_dir is None:
+             return None
+         key = hashlib.sha256(
+@@ -184,7 +191,9 @@ class PoliteClient:
+         return self.cache_dir / "api" / f"{key[:2]}" / f"{key}.json"
+ 
+     # ------------------------------------------------------------------ public functions
+-    def get_json(self, url: str, params: dict | None = None, headers: dict | None = None) -> Any | None:
++    def get_json(
++        self, url: str, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None
++    ) -> Any | None:
+         """Send a GET request to a JSON API.
+ 
+         Return None for a 404 answer or an error. The cache keeps the 200 and 404 answers.
+diff --git a/src/bioparser_ft/fetch/pdfcheck.py b/src/bioparser_ft/fetch/pdfcheck.py
+index 009809f82970082b8c7f976bec6bbe14048d6bd4..e00799a63ca0058d120f962a2b7b69a1ac84e166 100644
+--- a/src/bioparser_ft/fetch/pdfcheck.py
++++ b/src/bioparser_ft/fetch/pdfcheck.py
+@@ -52,7 +52,7 @@ def check_pdf(data: bytes, title: str, doi: str | None, *, min_bytes: int = MIN_
+         text = " ".join((reader.pages[i].extract_text() or "") for i in range(min(3, pages)))
+     except Exception as exc:  # A damaged or unusual PDF file: keep it, but not as verified
+         return PdfCheck(True, False, reason=f"pypdf cannot read the file: {type(exc).__name__}")
+-    doi_found = bool(doi) and doi.lower() in text.lower().replace(" ", "")
++    doi_found = bool(doi and doi.lower() in text.lower().replace(" ", ""))
+     if len(text.strip()) < 200:
+         return PdfCheck(True, doi_found, pages, None, doi_found, "no text layer: a scanned document?")
+     recall = title_recall_in_text(title, text) if title else None
+diff --git a/src/bioparser_ft/fetch/scholarly.py b/src/bioparser_ft/fetch/scholarly.py
+index bff5c50707262008c74e4a534aac6034b6aa0944..5ba9ee96c83935bf7e36bcbe471cd58bd93cf7f5 100644
+--- a/src/bioparser_ft/fetch/scholarly.py
++++ b/src/bioparser_ft/fetch/scholarly.py
+@@ -36,13 +36,15 @@ class Candidate:
+     The kind is "pdf" for a direct file, or "landing" for an HTML page that the code parses.
+     """
+ 
+-    rank: tuple = field(compare=True)
++    rank: tuple[int, int] = field(compare=True)
+     url: str = field(compare=False)
+     source: str = field(compare=False)
+     kind: str = field(compare=False, default="pdf")
+ 
+ 
+-def make_candidate(url: str | None, source: str, *, kind: str = "pdf", version: str = "", stage: int = 0):
++def make_candidate(
++    url: str | None, source: str, *, kind: str = "pdf", version: str = "", stage: int = 0
++) -> Candidate | None:
+     if not url:
+         return None
+     # The client made the labels from the published article. For this reason, the version of record comes first.
+@@ -66,9 +68,14 @@ class Resolution:
+             return "given"
+         return self.verdict.confidence if self.verdict else "none"
+ 
++    @property
++    def rank(self) -> int:
++        """Return the confidence of the match as a number. A larger number is a better match."""
++        return CONFIDENCE_ORDER[self.verdict.confidence] if self.verdict else -1
++
+ 
+ # --------------------------------------------------------------------- functions that read API fields
+-def _crossref_year(item: dict) -> int | None:
++def _crossref_year(item: dict[str, Any]) -> int | None:
+     for k in ("issued", "published-print", "published-online", "created"):
+         parts = (item.get(k) or {}).get("date-parts") or [[None]]
+         if parts and parts[0] and parts[0][0]:
+@@ -89,10 +96,10 @@ class Scholarly:
+         self.core_key = os.environ.get("CORE_API_KEY")
+         self.openalex_key = os.environ.get("OPENALEX_API_KEY")
+ 
+-    def _mailto(self) -> dict:
++    def _mailto(self) -> dict[str, str]:
+         return {"mailto": self.email} if self.email else {}
+ 
+-    def _openalex_params(self, **params) -> dict:
++    def _openalex_params(self, **params: object) -> dict[str, object]:
+         if self.openalex_key:
+             params["api_key"] = self.openalex_key
+         return params | self._mailto()
+@@ -118,7 +125,7 @@ class Scholarly:
+         The code always uses an override URL first.
+         """
+         if paper.doi:
+-            res = self._given_doi(paper)
++            res = self._given_doi(paper, paper.doi)
+         elif paper.url:
+             res = Resolution(source="override", title=paper.title, year=paper.year, landing=[paper.url])
+         else:
+@@ -127,17 +134,17 @@ class Scholarly:
+             res.candidates.insert(0, c)
+         return res
+ 
+-    def _given_doi(self, paper: Paper) -> Resolution:
++    def _given_doi(self, paper: Paper, doi: str) -> Resolution:
+         """For a known DOI, get the correct title from Crossref.
+ 
+         Then the PDF check compares the PDF with the real title, not with the title guess
+         from the citation.
+         """
+-        item = (self.c.get_json(f"{CROSSREF}/{quote(paper.doi, safe='/')}", self._mailto()) or {}).get(
++        item = (self.c.get_json(f"{CROSSREF}/{quote(doi, safe='/')}", self._mailto()) or {}).get(
+             "message"
+         ) or {}
+         return Resolution(
+-            doi=paper.doi,
++            doi=doi,
+             title=_first(item.get("title")) or paper.title,
+             year=_crossref_year(item) or paper.year,
+             source="override" if paper.overridden else "citation",
+@@ -151,12 +158,9 @@ class Scholarly:
+             except Exception as exc:  # An error in one API must not stop the full run
+                 res = Resolution(notes=[f"{finder.__name__}: {exc!r}"])
+             if res and res.verdict and res.verdict.accepted:
+-                if (
+-                    best is None
+-                    or CONFIDENCE_ORDER[res.verdict.confidence] > CONFIDENCE_ORDER[best.verdict.confidence]
+-                ):
++                if best is None or res.rank > best.rank:
+                     best = res
+-                if best.verdict.confidence == "high" and (best.doi or best.candidates):
++                if best.confidence == "high" and (best.doi or best.candidates):
+                     break
+         return best or Resolution(
+             notes=["no result agrees with the citation: add a DOI or URL to doi_overrides.tsv"]
+@@ -169,9 +173,7 @@ class Scholarly:
+             title = _first(item.get("title"))
+             authors = [a.get("family") or a.get("name") or "" for a in item.get("author", [])]
+             v = self._check(paper, title, _crossref_year(item), authors)
+-            if v.accepted and (
+-                best is None or CONFIDENCE_ORDER[v.confidence] > CONFIDENCE_ORDER[best.verdict.confidence]
+-            ):
++            if v.accepted and (best is None or CONFIDENCE_ORDER[v.confidence] > best.rank):
+                 best = Resolution(
+                     doi=clean_doi(item["DOI"]),
+                     title=title,
+@@ -192,9 +194,7 @@ class Scholarly:
+             v = self._check(
+                 paper, w.get("display_name") or w.get("title") or "", w.get("publication_year"), authors
+             )
+-            if not v.accepted or (
+-                best and CONFIDENCE_ORDER[v.confidence] <= CONFIDENCE_ORDER[best.verdict.confidence]
+-            ):
++            if not v.accepted or (best and CONFIDENCE_ORDER[v.confidence] <= best.rank):
+                 continue
+             res = Resolution(
+                 doi=clean_doi(w["doi"]) if w.get("doi") else None,
+@@ -226,9 +226,7 @@ class Scholarly:
+                 p.get("year"),
+                 [a.get("name", "") for a in p.get("authors") or []],
+             )
+-            if not v.accepted or (
+-                best and CONFIDENCE_ORDER[v.confidence] <= CONFIDENCE_ORDER[best.verdict.confidence]
+-            ):
++            if not v.accepted or (best and CONFIDENCE_ORDER[v.confidence] <= best.rank):
+                 continue
+             doi = (p.get("externalIds") or {}).get("DOI")
+             pdf = (p.get("openAccessPdf") or {}).get("url")
+@@ -256,9 +254,7 @@ class Scholarly:
+             authors = [c.get("familyName") or c.get("name", "") for c in a.get("creators") or []]
+             year = int(a["publicationYear"]) if str(a.get("publicationYear", "")).isdigit() else None
+             v = self._check(paper, title, year, authors)
+-            if v.accepted and (
+-                best is None or CONFIDENCE_ORDER[v.confidence] > CONFIDENCE_ORDER[best.verdict.confidence]
+-            ):
++            if v.accepted and (best is None or CONFIDENCE_ORDER[v.confidence] > best.rank):
+                 best = Resolution(
+                     doi=clean_doi(a.get("doi") or d.get("id", "")),
+                     title=title,
+@@ -285,9 +281,7 @@ class Scholarly:
+         for w in (data or {}).get("results", []) or []:
+             authors = [a.get("name", "") for a in w.get("authors") or []]
+             v = self._check(paper, w.get("title") or "", w.get("yearPublished"), authors)
+-            if v.accepted and (
+-                best is None or CONFIDENCE_ORDER[v.confidence] > CONFIDENCE_ORDER[best.verdict.confidence]
+-            ):
++            if v.accepted and (best is None or CONFIDENCE_ORDER[v.confidence] > best.rank):
+                 best = Resolution(
+                     doi=clean_doi(w["doi"]) if w.get("doi") else None,
+                     title=w.get("title", ""),
+@@ -299,7 +293,7 @@ class Scholarly:
+         return best
+ 
+     # --------------------------------------------------------------- PDF locations
+-    def _openalex_locations(self, work: dict) -> tuple[list[Candidate], list[str]]:
++    def _openalex_locations(self, work: dict[str, Any]) -> tuple[list[Candidate], list[str]]:
+         cands, landing = [], []
+         for loc in [work.get("best_oa_location"), *(work.get("locations") or [])]:
+             if not loc:
+@@ -310,7 +304,7 @@ class Scholarly:
+                 landing.append(loc["landing_page_url"])
+         return cands, landing
+ 
+-    def oa_candidates(self, doi: str, info: dict | None = None) -> Iterator[list[Candidate]]:
++    def oa_candidates(self, doi: str, info: dict[str, str] | None = None) -> Iterator[list[Candidate]]:
+         """Yield the candidates in batches, with the best sources first.
+ 
+         When a batch gives a good PDF, the caller stops. Then the code does not call the other APIs.
+@@ -354,30 +348,30 @@ class Scholarly:
+             lambda: self.c.get_json(S2 + f"DOI:{qdoi}", {"fields": "openAccessPdf"}, headers),
+             lambda: self.c.get_json(f"{CROSSREF}/{qdoi}", self._mailto()),
+         )
+-        batch = []
++        found: list[Candidate | None] = []
+         for r in ((e or {}).get("resultList") or {}).get("result", [])[:1]:
+             pmcid = pmcid or r.get("pmcid") or ""
+             for f in (r.get("fullTextUrlList") or {}).get("fullTextUrl") or []:
+                 if f.get("documentStyle") == "pdf" and f.get("availabilityCode") in ("OA", "F"):
+-                    batch.append(make_candidate(f.get("url"), "europepmc", stage=1))
++                    found.append(make_candidate(f.get("url"), "europepmc", stage=1))
+         if pmcid.upper().startswith("PMC"):
+-            batch.append(
++            found.append(
+                 make_candidate(
+                     f"https://europepmc.org/backend/ptpmcrender.fcgi?accid={pmcid}&blobtype=pdf",
+                     "europepmc",
+                     stage=1,
+                 )
+             )
+-            batch.append(
++            found.append(
+                 make_candidate(f"https://europepmc.org/articles/{pmcid}?pdf=render", "europepmc", stage=1)
+             )
+-        batch.append(
++        found.append(
+             make_candidate(((s or {}).get("openAccessPdf") or {}).get("url"), "semanticscholar", stage=1)
+         )
+         item = (cr or {}).get("message") or {}
+         for link in item.get("link") or []:
+             if link.get("content-type") == "application/pdf":
+-                batch.append(
++                found.append(
+                     make_candidate(
+                         link.get("URL"),
+                         "crossref-link",
+@@ -386,11 +380,12 @@ class Scholarly:
+                     )
+                 )
+         for url in publisher_pdf_urls(doi, item):
+-            batch.append(make_candidate(url, "publisher-pattern", stage=1))
+-        yield sorted(c for c in batch if c)
++            found.append(make_candidate(url, "publisher-pattern", stage=1))
++        yield sorted(c for c in found if c)
+ 
+         # Stage 2: landing pages. The doi.org page comes first, because it opens the page of the publisher.
+-        seen, pages = set(), []
++        seen: set[str] = set()
++        pages: list[Candidate | None] = []
+         for url in [f"https://doi.org/{doi}", *landing]:
+             if url not in seen:
+                 seen.add(url)
+diff --git a/src/bioparser_ft/train.py b/src/bioparser_ft/train.py
+index 63e0768b050fb2d37859737a48fdb011c9f8162c..f4df968d1d6b2a55f48354ec09faba0617453a69 100644
+--- a/src/bioparser_ft/train.py
++++ b/src/bioparser_ft/train.py
+@@ -72,7 +72,7 @@ class TrainConfig:
+     extra: dict[str, Any] = field(default_factory=dict)
+ 
+ 
+-def read_split(dataset_dir: Path, split: str) -> list[dict]:
++def read_split(dataset_dir: Path, split: str) -> list[dict[str, Any]]:
+     path = dataset_dir / f"{split}.jsonl"
+     if not path.exists():
+         return []
+@@ -88,9 +88,9 @@ def _sha256(path: Path) -> str | None:
+     return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+ 
+ 
+-def lora_report(model: Any) -> Counter:
++def lora_report(model: Any) -> Counter[str]:
+     """Number of LoRA-wrapped modules per leaf name (verifies the targets really attached)."""
+-    counts: Counter = Counter()
++    counts: Counter[str] = Counter()
+     for name, module in model.named_modules():
+         lora_a = getattr(module, "lora_A", None)
+         if lora_a is not None and hasattr(lora_a, "keys") and len(lora_a):
+@@ -127,7 +127,13 @@ def load_model(cfg: TrainConfig) -> tuple[Any, Any]:
+     return model, processor
+ 
+ 
+-def build_trainer(cfg: TrainConfig, model: Any, processor: Any, train_rows: list, val_rows: list) -> Any:
++def build_trainer(
++    cfg: TrainConfig,
++    model: Any,
++    processor: Any,
++    train_rows: list[dict[str, Any]],
++    val_rows: list[dict[str, Any]],
++) -> Any:
+     from unsloth.chat_templates import train_on_responses_only  # noqa: I001 - unsloth must patch trl first
+     from datasets import Dataset
+     from trl import SFTConfig, SFTTrainer
+@@ -222,10 +228,10 @@ def save_artifacts(
+     cfg: TrainConfig,
+     model: Any,
+     processor: Any,
+-    train_rows: list,
+-    val_rows: list,
+-    dropped: list,
+-    metrics: dict,
++    train_rows: list[dict[str, Any]],
++    val_rows: list[dict[str, Any]],
++    dropped: list[tuple[str, int]],
++    metrics: dict[str, Any],
+ ) -> Path:
+     """Save adapter + processor + provenance (prompt version, dataset hashes, ids)."""
+     adapter_dir = cfg.output_dir / "lora_adapter"
+diff --git a/tests/test_evaluate_chat.py b/tests/test_evaluate_chat.py
+index 5d4ede8bbb9f11cd785c54a307dddc28c71b6880..a1f81e573474bf347350917f16734a98ef4fee4a 100644
+--- a/tests/test_evaluate_chat.py
++++ b/tests/test_evaluate_chat.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import json
++from collections.abc import Mapping, Sequence
+ from pathlib import Path
+ 
+ import pytest
+@@ -36,7 +37,7 @@ GOLD = [
+ ]
+ 
+ 
+-def test_scores():
++def test_scores() -> None:
+     perfect = aggregate([score_document(list(reversed(GOLD)), GOLD)])  # order does not matter
+     assert perfect["row"]["f1"] == perfect["cell"]["f1"] == perfect["value"]["f1"] == 1.0
+     assert perfect["references_exact"] == 1.0
+@@ -48,7 +49,7 @@ def test_scores():
+     assert numeric["value"]["f1"] == 1.0  # "81.70" == "81.7"
+ 
+ 
+-def test_evaluate_files(tmp_path: Path):
++def test_evaluate_files(tmp_path: Path) -> None:
+     tsv = "\n".join(["\t".join(MODEL_COLUMNS)] + ["\t".join(r[c] for c in MODEL_COLUMNS) for r in GOLD])
+     ds = tmp_path / "test.jsonl"
+     ds.write_text(json.dumps({"id": "p1", "messages": build_messages("x", tsv)}) + "\n", encoding="utf-8")
+@@ -69,8 +70,12 @@ class StubTokenizer:
+         self.honours_flag = honours_flag
+ 
+     def apply_chat_template(
+-        self, messages, tokenize=False, add_generation_prompt=False, enable_thinking=True
+-    ):
++        self,
++        messages: Sequence[Mapping[str, str]],
++        tokenize: bool = False,
++        add_generation_prompt: bool = False,
++        enable_thinking: bool = True,
++    ) -> str:
+         text = "".join(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n" for m in messages)
+         if add_generation_prompt:
+             text += "<|im_start|>assistant\n"
+@@ -80,7 +85,7 @@ class StubTokenizer:
+                 text += NO_THINK_PREFIX
+         return text
+ 
+-    def __call__(self, texts, add_special_tokens=False):
++    def __call__(self, texts: Sequence[str], add_special_tokens: bool = False) -> dict[str, list[list[str]]]:
+         return {"input_ids": [t.split() for t in texts]}
+ 
+ 
+@@ -91,7 +96,7 @@ class StubProcessor:  # what FastLanguageModel returns for Qwen3.5
+ 
+ 
+ @pytest.mark.parametrize("honours_flag", [True, False])
+-def test_render_prompt_is_non_thinking(honours_flag: bool):
++def test_render_prompt_is_non_thinking(honours_flag: bool) -> None:
+     proc = StubProcessor(StubTokenizer(honours_flag))
+     msgs = build_messages("# Paper\nMus spretus 66.2 mm", "ANSWER_SENTINEL")
+     prompt = render_prompt(proc, msgs)
+@@ -102,7 +107,7 @@ def test_render_prompt_is_non_thinking(honours_flag: bool):
+     assert text == prompt + "ANSWER_SENTINEL<|im_end|>"  # ends exactly with EOS
+ 
+ 
+-def test_prepare_training_texts_drops_not_truncates():
++def test_prepare_training_texts_drops_not_truncates() -> None:
+     proc = StubProcessor(StubTokenizer())
+     rows = [
+         {"id": "short", "messages": build_messages("a", "T")},
+@@ -112,7 +117,7 @@ def test_prepare_training_texts_drops_not_truncates():
+     assert [r["id"] for r in kept] == ["short"] and dropped[0][0] == "long"
+ 
+ 
+-def test_render_with_real_transformers_template():
++def test_render_with_real_transformers_template() -> None:
+     """Runs where transformers is installed (the training env): real apply_chat_template."""
+     pytest.importorskip("tokenizers")
+     transformers = pytest.importorskip("transformers")
+diff --git a/tests/test_fetch.py b/tests/test_fetch.py
+index bd53929646096e5f1b2362d243a74e28c494670d..8c9bd39c9ff5af4da55000be0317b5901f68f57b 100644
+--- a/tests/test_fetch.py
++++ b/tests/test_fetch.py
+@@ -7,6 +7,7 @@ and a Chromium binary are available (BIOPARSER_CHROMIUM=/path/to/chrome).
+ 
+ from __future__ import annotations
+ 
++import argparse
+ import csv
+ import itertools
+ import json
+@@ -16,22 +17,25 @@ import time
+ from concurrent.futures import ThreadPoolExecutor
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+ from pathlib import Path
+-from typing import ClassVar
++from typing import TYPE_CHECKING, Any, ClassVar
+ from urllib.parse import parse_qs, urlsplit
+ 
+ import pytest
+ from conftest import ets_row, write_ets
+ 
+-httpx = pytest.importorskip("httpx")
++if TYPE_CHECKING:
++    import httpx
++else:
++    httpx = pytest.importorskip("httpx")
+ pytest.importorskip("bs4")
+ pytest.importorskip("pypdf")
+ 
+-from bioparser_ft.fetch.citations import group_papers, parse_citation  # noqa: E402
+-from bioparser_ft.fetch.cli import build_parser, run  # noqa: E402
+-from bioparser_ft.fetch.landing import pdf_links_from_html, publisher_pdf_urls  # noqa: E402
+-from bioparser_ft.fetch.matching import verify  # noqa: E402
+-from bioparser_ft.fetch.net import PoliteClient  # noqa: E402
+-from bioparser_ft.fetch.pdfcheck import check_pdf  # noqa: E402
++from bioparser_ft.fetch.citations import group_papers, parse_citation
++from bioparser_ft.fetch.cli import build_parser, run
++from bioparser_ft.fetch.landing import pdf_links_from_html, publisher_pdf_urls
++from bioparser_ft.fetch.matching import verify
++from bioparser_ft.fetch.net import PoliteClient
++from bioparser_ft.fetch.pdfcheck import check_pdf
+ 
+ FILLER = " The study reports measurements of skull and body size for many specimens." * 6
+ 
+@@ -83,20 +87,22 @@ def make_pdf(text: str, pad: int = 6000) -> bytes:
+          "Khan", 2022, "Record of a pipistrelle from Pakistan", False),
+     ],
+ )  # fmt: skip
+-def test_parse_citation_formats(citation, author, year, title_start, thesis):
++def test_parse_citation_formats(
++    citation: str, author: str, year: int | None, title_start: str, thesis: bool
++) -> None:
+     a, y, title, is_thesis, _ = parse_citation(citation)
+     assert (a, y, is_thesis) == (author, year, thesis)
+     assert title.startswith(title_start), title
+ 
+ 
+-def test_doi_in_citation():
++def test_doi_in_citation() -> None:
+     *_, doi = parse_citation(
+         "Dahal D.R, Thapa S. First records of a bat. J. Bat Res. DOI: 10.14709/BarbJ.15.1.2022.05."
+     )
+     assert doi == "10.14709/barbj.15.1.2022.05"
+ 
+ 
+-def test_verify_levels():
++def test_verify_levels() -> None:
+     cit = "Doe, J. and Roe, R., 2020. Echolocation calls of cave bats in northern Somewhere. J. Mamm., 1(2), pp.1-2."
+     title = "Echolocation calls of cave bats in northern Somewhere"
+     assert verify(cit, title, "Doe", 2020, title, 2020, ["Doe", "Roe"]).confidence == "high"
+@@ -111,7 +117,7 @@ def test_verify_levels():
+ 
+ 
+ # ----------------------------------------------------------------------- landing pages
+-def test_pdf_links_from_html_priorities():
++def test_pdf_links_from_html_priorities() -> None:
+     html = """<html><head>
+       <meta name="citation_pdf_url" content="/content/article.pdf">
+       <link rel="alternate" type="application/pdf" href="https://cdn.example.org/alt.pdf"></head><body>
+@@ -126,7 +132,7 @@ def test_pdf_links_from_html_priorities():
+     assert not any("about" in u or "javascript" in u for u in links)
+ 
+ 
+-def test_bepress_and_figshare_links():
++def test_bepress_and_figshare_links() -> None:
+     html = (
+         '<meta name="bepress_citation_pdf_url" content="https://docs.lib.edu/cgi/viewcontent.cgi?article=1">'
+         '<a href="https://hammer.example.edu/ndownloader/files/123">Download (2 MB)</a>'
+@@ -138,7 +144,7 @@ def test_bepress_and_figshare_links():
+     ]
+ 
+ 
+-def test_publisher_patterns():
++def test_publisher_patterns() -> None:
+     assert publisher_pdf_urls("10.1007/s42991-023-00001-1") == [
+         "https://link.springer.com/content/pdf/10.1007/s42991-023-00001-1.pdf"
+     ]
+@@ -152,7 +158,7 @@ def test_publisher_patterns():
+ 
+ 
+ # ----------------------------------------------------------------------- PDF file checks
+-def test_check_pdf():
++def test_check_pdf() -> None:
+     title = "Echolocation calls of cave bats in northern Somewhere"
+     good = check_pdf(make_pdf(title + FILLER), title, "10.1000/a")
+     assert good.is_pdf and good.verified and good.pages == 1 and good.title_recall == 1.0
+@@ -173,7 +179,7 @@ TITLE_A = "Echolocation calls of cave bats in northern Somewhere"
+ TITLE_B = "Skull morphology of field mice from Elsewhere"
+ 
+ 
+-def _crossref_item(doi, title, family, year):
++def _crossref_item(doi: str, title: str, family: str, year: int) -> dict[str, Any]:
+     return {"DOI": doi, "title": [title], "author": [{"family": family}], "issued": {"date-parts": [[year]]}}
+ 
+ 
+@@ -230,8 +236,8 @@ def _setup(tmp_path: Path) -> Path:
+     return tsv
+ 
+ 
+-def _client(tmp_path: Path, calls: list) -> PoliteClient:
+-    def handler(request):
++def _client(tmp_path: Path, calls: list[str]) -> PoliteClient:
++    def handler(request: httpx.Request) -> httpx.Response:
+         calls.append(str(request.url))
+         return fake_web(request)
+ 
+@@ -244,7 +250,7 @@ def _client(tmp_path: Path, calls: list) -> PoliteClient:
+     )
+ 
+ 
+-def test_fetch_end_to_end(tmp_path: Path):
++def test_fetch_end_to_end(tmp_path: Path) -> None:
+     tsv = _setup(tmp_path)
+     out = tmp_path / "pdfs"
+     args = build_parser().parse_args([
+@@ -256,10 +262,12 @@ def test_fetch_end_to_end(tmp_path: Path):
+     outcomes = {o.paper.key: o for o in run(args, client=_client(tmp_path, calls))}
+ 
+     assert outcomes["Doe and Roe, 2020"].status == "downloaded"
+-    assert outcomes["Doe and Roe, 2020"].got.source == "unpaywall"
++    doe = outcomes["Doe and Roe, 2020"].got
++    assert doe is not None and doe.source == "unpaywall"
+     assert outcomes["Smith, 2021"].status == "downloaded"
+     # The citation_pdf_url on the landing page of the DOI
+-    assert outcomes["Smith, 2021"].got.source == "landing"
++    smith = outcomes["Smith, 2021"].got
++    assert smith is not None and smith.source == "landing"
+     assert outcomes["Nobody, 2019"].status == "unresolved"  # The code refuses the incorrect Crossref result
+     assert outcomes["Doe and Roe, 2020"].oa_status == "green"
+     assert (out / "Doe and Roe, 2020.pdf").read_bytes().startswith(b"%PDF-")
+@@ -283,7 +291,7 @@ def test_fetch_end_to_end(tmp_path: Path):
+     assert calls == []
+ 
+ 
+-def test_overrides_split_and_fix(tmp_path: Path):
++def test_overrides_split_and_fix(tmp_path: Path) -> None:
+     tsv = _setup(tmp_path)
+     ov = tmp_path / "doi_overrides.tsv"
+     ov.write_text("tsv\tdoi\turl\tnote\nETS_Nobody, 2019.tsv\t10.1000/b\t\tfound by hand\n", encoding="utf-8")
+@@ -310,7 +318,7 @@ class _Site(BaseHTTPRequestHandler):
+         "/nothing.html": "<p>No PDF here</p>",
+     }  # fmt: skip
+ 
+-    def do_GET(self):
++    def do_GET(self) -> None:
+         if self.path == "/files/paper.pdf":
+             body = make_pdf("Echolocation calls of cave bats" + FILLER)
+             self.send_response(200)
+@@ -327,13 +335,13 @@ class _Site(BaseHTTPRequestHandler):
+         self.end_headers()
+         self.wfile.write(body)
+ 
+-    def log_message(self, *args):
++    def log_message(self, format: str, *args: Any) -> None:
+         pass
+ 
+ 
+ @pytest.mark.skipif(not CHROMIUM, reason="set BIOPARSER_CHROMIUM to a Chromium/Chrome binary")
+ @pytest.mark.parametrize("page", ["/landing.html", "/js.html", "/meta.html"])
+-def test_browser_auto_mode(tmp_path: Path, page: str):
++def test_browser_auto_mode(tmp_path: Path, page: str) -> None:
+     pytest.importorskip("playwright")
+     from bioparser_ft.fetch.browser import BrowserFetcher
+ 
+@@ -350,7 +358,7 @@ def test_browser_auto_mode(tmp_path: Path, page: str):
+ 
+ 
+ @pytest.mark.skipif(not CHROMIUM, reason="set BIOPARSER_CHROMIUM to a Chromium/Chrome binary")
+-def test_browser_manual_mode_waits_and_times_out(tmp_path: Path):
++def test_browser_manual_mode_waits_and_times_out(tmp_path: Path) -> None:
+     pytest.importorskip("playwright")
+     from bioparser_ft.fetch.browser import BrowserFetcher
+ 
+@@ -366,7 +374,7 @@ def test_browser_manual_mode_waits_and_times_out(tmp_path: Path):
+         server.shutdown()
+ 
+ 
+-def test_proxy_only_in_manual_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
++def test_proxy_only_in_manual_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+     """The library terms do not let programs download articles automatically.
+ 
+     Only the manual pass uses the proxy and the saved login. The headless pass uses an empty profile.
+@@ -379,19 +387,19 @@ def test_proxy_only_in_manual_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPat
+     opened: list[tuple[bool, Path, str]] = []
+ 
+     class FakeBrowser:
+-        def __init__(self, *, profile_dir: Path, headless: bool, **kwargs):
++        def __init__(self, *, profile_dir: Path, headless: bool, **kwargs: object) -> None:
+             self.profile_dir, self.headless = profile_dir, headless
+ 
+-        def __enter__(self):
++        def __enter__(self) -> FakeBrowser:
+             return self
+ 
+-        def __exit__(self, *exc):
++        def __exit__(self, *exc: object) -> None:
+             return None
+ 
+-        def fetch_auto(self, url: str):
++        def fetch_auto(self, url: str) -> None:
+             opened.append((self.headless, self.profile_dir, url))
+ 
+-        def fetch_manual(self, url: str, label: str, timeout_s: float):
++        def fetch_manual(self, url: str, label: str, timeout_s: float) -> None:
+             opened.append((self.headless, self.profile_dir, url))
+ 
+     monkeypatch.setattr(browser, "BrowserFetcher", FakeBrowser)
+@@ -410,14 +418,14 @@ def test_proxy_only_in_manual_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPat
+     assert manual_url == prefix + "https://doi.org/10.1000/a"
+ 
+ 
+-def test_report_json_safe(tmp_path: Path):
++def test_report_json_safe(tmp_path: Path) -> None:
+     """A report cell never contains a tab or a line break, so each paper has one row."""
+     from bioparser_ft.fetch.cli import _cell
+ 
+     assert _cell("a\tb\nc") == "a b c" and json.dumps(_cell(None)) == '""'
+ 
+ 
+-def test_oa_candidates_parses_every_source(tmp_path: Path):
++def test_oa_candidates_parses_every_source(tmp_path: Path) -> None:
+     """The code reads the correct fields from Unpaywall, OpenAlex, Europe PMC, Semantic Scholar and Crossref."""
+     from bioparser_ft.fetch.scholarly import Scholarly
+ 
+@@ -520,7 +528,7 @@ def test_oa_candidates_parses_every_source(tmp_path: Path):
+ 
+ 
+ # ----------------------------------------------------------------------- concurrency
+-def _args(tmp_path: Path, tsv: Path, *extra: str):
++def _args(tmp_path: Path, tsv: Path, *extra: str) -> argparse.Namespace:
+     return build_parser().parse_args([
+         "--tsv-dir", str(tsv), "--out-dir", str(tmp_path / "pdfs"), "--report", str(tmp_path / "report.tsv"),
+         "--manifest", str(tmp_path / "manifest.tsv"), "--overrides", str(tmp_path / "none.tsv"),
+@@ -529,7 +537,7 @@ def _args(tmp_path: Path, tsv: Path, *extra: str):
+ 
+ 
+ @pytest.mark.parametrize("workers", ["1", "4"])
+-def test_workers_give_the_same_results(tmp_path: Path, workers: str):
++def test_workers_give_the_same_results(tmp_path: Path, workers: str) -> None:
+     """The papers run at the same time, but the results and the report sequence do not change."""
+     tsv = _setup(tmp_path)
+     outcomes = run(_args(tmp_path, tsv, "--workers", workers), client=_client(tmp_path, []))
+@@ -542,12 +550,12 @@ def test_workers_give_the_same_results(tmp_path: Path, workers: str):
+         assert [r["key"] for r in csv.DictReader(fh, delimiter="\t")] == [o.paper.key for o in outcomes]
+ 
+ 
+-def test_error_in_one_paper_does_not_stop_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
++def test_error_in_one_paper_does_not_stop_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+     from bioparser_ft.fetch import cli
+ 
+     real = cli.fetch_http
+ 
+-    def fetch_http(client, sch, paper, res, info=None):
++    def fetch_http(client: Any, sch: Any, paper: Any, res: Any, info: dict[str, str] | None = None) -> Any:
+         if paper.key.startswith("Smith"):
+             raise RuntimeError("broken PDF parser")
+         return real(client, sch, paper, res, info)
+@@ -560,7 +568,7 @@ def test_error_in_one_paper_does_not_stop_the_run(tmp_path: Path, monkeypatch: p
+     assert "broken PDF parser" in outcomes["Smith, 2021"].notes[0]
+ 
+ 
+-def test_threads_share_the_rate_limit_of_a_host():
++def test_threads_share_the_rate_limit_of_a_host() -> None:
+     """Two requests to one host start 0.1 s apart or more. Two different hosts do not wait for each other."""
+     starts: dict[str, list[float]] = {}
+     lock = threading.Lock()
+@@ -580,7 +588,7 @@ def test_threads_share_the_rate_limit_of_a_host():
+     assert abs(min(starts["a.example"]) - min(starts["b.example"])) < 0.15
+ 
+ 
+-def test_server_rate_limit_and_retry_after():
++def test_server_rate_limit_and_retry_after() -> None:
+     calls: list[str] = []
+ 
+     def handler(request: httpx.Request) -> httpx.Response:
+@@ -599,7 +607,7 @@ def test_server_rate_limit_and_retry_after():
+     assert calls.count("/busy") == 2 and max(slept) > 6  # The client waited for the Retry-After time
+ 
+ 
+-def test_oa_candidates_parallel_stages_are_equal(tmp_path: Path):
++def test_oa_candidates_parallel_stages_are_equal(tmp_path: Path) -> None:
+     """With a thread pool, the API calls of one stage go out at the same time. The batches do not change."""
+     from bioparser_ft.fetch.scholarly import Scholarly
+ 
+@@ -614,11 +622,11 @@ def test_oa_candidates_parallel_stages_are_equal(tmp_path: Path):
+             return httpx.Response(200, json={"openAccessPdf": {"url": "https://s2.example/x.pdf"}})
+         return httpx.Response(404)
+ 
+-    def stages(pool):
++    def stages(pool: ThreadPoolExecutor | None) -> tuple[list[list[tuple[str, str]]], str]:
+         client = PoliteClient(
+             email="t@example.org", delay=0, transport=httpx.MockTransport(handler), sleep=lambda s: None
+         )
+-        info: dict = {}
++        info: dict[str, str] = {}
+         sch = Scholarly(client, email="t@example.org", pool=pool)
+         batches = [[(c.source, c.url) for c in b] for b in sch.oa_candidates("10.1000/x", info)]
+         return batches, info["oa_status"]
+@@ -628,7 +636,7 @@ def test_oa_candidates_parallel_stages_are_equal(tmp_path: Path):
+     assert stages(None)[1] == "green"
+ 
+ 
+-def test_headless_pass_uses_parallel_browsers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
++def test_headless_pass_uses_parallel_browsers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+     """Each headless browser has its own thread and its own empty profile."""
+     from bioparser_ft.fetch import browser
+     from bioparser_ft.fetch.citations import Paper
+@@ -639,16 +647,16 @@ def test_headless_pass_uses_parallel_browsers(tmp_path: Path, monkeypatch: pytes
+     lock = threading.Lock()
+ 
+     class FakeBrowser:
+-        def __init__(self, *, profile_dir: Path, headless: bool, **kwargs):
++        def __init__(self, *, profile_dir: Path, headless: bool, **kwargs: object) -> None:
+             self.profile_dir = profile_dir
+ 
+-        def __enter__(self):
++        def __enter__(self) -> FakeBrowser:
+             return self
+ 
+-        def __exit__(self, *exc):
++        def __exit__(self, *exc: object) -> None:
+             return None
+ 
+-        def fetch_auto(self, url: str):
++        def fetch_auto(self, url: str) -> None:
+             with lock:
+                 seen.add((threading.get_ident(), self.profile_dir))
+             time.sleep(0.05)  # The other threads take the next papers in this time
+@@ -667,9 +675,10 @@ def test_headless_pass_uses_parallel_browsers(tmp_path: Path, monkeypatch: pytes
+ 
+ 
+ @pytest.mark.skipif(not CHROMIUM, reason="set BIOPARSER_CHROMIUM to a Chromium/Chrome binary")
+-def test_parallel_headless_pass_with_chromium(tmp_path: Path):
++def test_parallel_headless_pass_with_chromium(tmp_path: Path) -> None:
+     """Two real browsers, each in its own thread with its own Playwright, get four PDF files."""
+     pytest.importorskip("playwright")
++    assert CHROMIUM is not None
+     from bioparser_ft.fetch.citations import Paper
+     from bioparser_ft.fetch.cli import Outcome, browser_pass
+     from bioparser_ft.fetch.scholarly import Resolution
+@@ -698,7 +707,7 @@ def test_parallel_headless_pass_with_chromium(tmp_path: Path):
+     assert not (tmp_path / "profile").exists()
+ 
+ 
+-def test_rate_limit_applies_to_each_redirect_hop():
++def test_rate_limit_applies_to_each_redirect_hop() -> None:
+     """doi.org only sends redirects. The publisher after the redirect keeps its own rate limit."""
+     starts: dict[str, list[float]] = {}
+     lock = threading.Lock()
+@@ -713,7 +722,7 @@ def test_rate_limit_applies_to_each_redirect_hop():
+     client = PoliteClient(delay=0.3, transport=httpx.MockTransport(handler))
+     with ThreadPoolExecutor(max_workers=3) as pool:
+         pages = list(pool.map(client.get_web, [f"https://doi.org/10.1000/{i}" for i in range(3)]))
+-    assert [p.url for p in pages] == [f"https://pub.example/10.1000/{i}" for i in range(3)]
++    assert [p.url for p in pages if p is not None] == [f"https://pub.example/10.1000/{i}" for i in range(3)]
+     for host, gap in (("doi.org", 0.18), ("pub.example", 0.28)):
+         t = sorted(starts[host])
+         assert all(later - earlier >= gap for earlier, later in itertools.pairwise(t)), host
+diff --git a/tests/test_linking_coverage_build.py b/tests/test_linking_coverage_build.py
+index aebc28a77f3ff03ddc14eb023f9edda52da3b364..d0e19628a4d3a7381d696de1b50edd72d5b8c0ea 100644
+--- a/tests/test_linking_coverage_build.py
++++ b/tests/test_linking_coverage_build.py
+@@ -13,12 +13,12 @@ from bioparser_ft.schema import ETS_COLUMNS, MODEL_HEADER, SYSTEM_PROMPT
+ from bioparser_ft.tsv import normalize_record, parse_model_tsv
+ 
+ 
+-def test_paper_key_normalisation():
++def test_paper_key_normalisation() -> None:
+     assert paper_key("ETS_López‐Aguirre et al., 2023") == paper_key("López-Aguirre et al.,  2023")
+     assert paper_key("ETS_Abi-Said, M.R. and El Haddad, E., 2023") == "abi-said, m.r. and el haddad, e., 2023"
+ 
+ 
+-def test_discover_markdown_layouts(parsed_dir: Path):
++def test_discover_markdown_layouts(parsed_dir: Path) -> None:
+     extracted = parsed_dir / "Extracted, 2024"
+     extracted.mkdir()
+     (extracted / "markdown.md").write_text("x", encoding="utf-8")  # unzipped MinerU folder
+@@ -29,7 +29,7 @@ def test_discover_markdown_layouts(parsed_dir: Path):
+     assert not warnings
+ 
+ 
+-def test_zip_member_size_cap(tmp_path: Path):
++def test_zip_member_size_cap(tmp_path: Path) -> None:
+     z = tmp_path / "big.zip"
+     with zipfile.ZipFile(z, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+         zf.writestr("markdown.md", "0" * 10_000)
+@@ -41,7 +41,7 @@ def test_zip_member_size_cap(tmp_path: Path):
+         raise AssertionError("size cap not enforced")
+ 
+ 
+-def test_link_with_manifest(ets_dir: Path, parsed_dir: Path, manifest: Path):
++def test_link_with_manifest(ets_dir: Path, parsed_dir: Path, manifest: Path) -> None:
+     res = link(ets_dir, parsed_dir, manifest)
+     pairs = {p.markdown.key: [t.name for t in p.tsv_paths] for p in res.pairs}
+     assert pairs["doe and roe, 2020"] == ["ETS_Doe and Roe, 2020.tsv", "ETS_Doe and Roe, 2020 part 2.tsv"]
+@@ -51,7 +51,7 @@ def test_link_with_manifest(ets_dir: Path, parsed_dir: Path, manifest: Path):
+     assert no_manifest.suggestions["ETS_Doe and Roe, 2020 part 2.tsv"] == "Doe and Roe, 2020.zip"
+ 
+ 
+-def test_coverage_detects_wrong_pdf():
++def test_coverage_detects_wrong_pdf() -> None:
+     records = [normalize_record(dict(zip(ETS_COLUMNS, r, strict=True))) for r in paper_a_rows()]
+     good = label_coverage(paper_a_markdown(), records)
+     assert good.value_ratio == 1.0 and good.name_ratio == 1.0
+@@ -59,12 +59,12 @@ def test_coverage_detects_wrong_pdf():
+     assert bad.value_ratio == 0.0 and bad.missing_values
+ 
+ 
+-def test_numbers_in():
++def test_numbers_in() -> None:
+     assert numbers_in("n = 3, FA 37.40 mm, 1,5 g, 1,234 kg") >= {"37.4", "1.5", "1234"}
+     assert "3" not in numbers_in("n = 3")  # small integers carry no signal
+ 
+ 
+-def test_build_end_to_end(ets_dir: Path, parsed_dir: Path, manifest: Path, tmp_path: Path):
++def test_build_end_to_end(ets_dir: Path, parsed_dir: Path, manifest: Path, tmp_path: Path) -> None:
+     out = tmp_path / "processed"
+     report = build(ets_dir, parsed_dir, out, manifest=manifest, val_fraction=0.0, test_fraction=0.0)
+     assert report["counts"]["train"] == 2  # Doe (2 TSVs merged) + Smith
+@@ -81,14 +81,14 @@ def test_build_end_to_end(ets_dir: Path, parsed_dir: Path, manifest: Path, tmp_p
+     assert len(parse_model_tsv(assistant["content"]).records) == 3 == doe["n_rows"]
+ 
+ 
+-def test_split_is_stable_and_grouped():
++def test_split_is_stable_and_grouped() -> None:
+     a = assign_split("doe, j., 2020. title.", 0.2, 0.2, "salt")
+     assert all(assign_split("doe, j., 2020. title.", 0.2, 0.2, "salt") == a for _ in range(5))
+     splits = [assign_split(f"paper {i}", 0.1, 0.1, "salt") for i in range(2000)]
+     assert 0.07 < splits.count("test") / 2000 < 0.13
+ 
+ 
+-def test_build_uses_default_manifest(ets_dir: Path, parsed_dir: Path, tmp_path: Path):
++def test_build_uses_default_manifest(ets_dir: Path, parsed_dir: Path, tmp_path: Path) -> None:
+     """The fetch command writes manifest.tsv next to ets_tsv/. The builder uses it without --manifest."""
+     (ets_dir.parent / "manifest.tsv").write_text(
+         "tsv\tmarkdown\nETS_Doe and Roe, 2020 part 2.tsv\tDoe and Roe, 2020.zip\n", encoding="utf-8"
+@@ -98,7 +98,7 @@ def test_build_uses_default_manifest(ets_dir: Path, parsed_dir: Path, tmp_path:
+     assert report["unmatched_tsv"] == ["ETS_Nobody, 1999.tsv"]  # the "part 2" file has its pair
+ 
+ 
+-def test_build_without_manifest_file(ets_dir: Path, parsed_dir: Path, tmp_path: Path):
++def test_build_without_manifest_file(ets_dir: Path, parsed_dir: Path, tmp_path: Path) -> None:
+     report = build(ets_dir, parsed_dir, tmp_path / "processed", val_fraction=0.0, test_fraction=0.0)
+     assert report["manifest"] is None
+     assert "ETS_Doe and Roe, 2020 part 2.tsv" in report["unmatched_tsv"]
+diff --git a/tests/test_notebook_clean.py b/tests/test_notebook_clean.py
+index 3a12686d6cf7c60b833eaff6397a3207766f7d00..f75502aa03fdde0fa8d0da4b1be10fa690b420d6 100644
+--- a/tests/test_notebook_clean.py
++++ b/tests/test_notebook_clean.py
+@@ -12,7 +12,7 @@ NOTEBOOKS = sorted((Path(__file__).parents[1] / "notebooks").glob("*.ipynb"))
+ 
+ 
+ @pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda p: p.name)
+-def test_notebook_has_no_outputs(path: Path):
++def test_notebook_has_no_outputs(path: Path) -> None:
+     nb = json.loads(path.read_text(encoding="utf-8"))
+     dirty = [i for i, c in enumerate(nb["cells"]) if c.get("outputs") or c.get("execution_count")]
+     assert not dirty, f"{path.name}: clear outputs before committing (cells {dirty})"
+@@ -20,7 +20,7 @@ def test_notebook_has_no_outputs(path: Path):
+ 
+ 
+ @pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda p: p.name)
+-def test_notebook_does_not_install_packages(path: Path):
++def test_notebook_does_not_install_packages(path: Path) -> None:
+     nb = json.loads(path.read_text(encoding="utf-8"))
+     for cell in nb["cells"]:
+         src = "".join(cell["source"])
+diff --git a/tests/test_postprocess.py b/tests/test_postprocess.py
+index e617bee2e874f9e3b0bfa4ba1b05b0ac3b5e0490..844a6253221f53892bdbc85c740fcaca4166c27e 100644
+--- a/tests/test_postprocess.py
++++ b/tests/test_postprocess.py
+@@ -37,11 +37,11 @@ from bioparser_ft.schema import ETS_COLUMNS, MODEL_COLUMNS
+         ("", ""),
+     ],
+ )
+-def test_infer_taxon_rank(name: str, rank: str):
++def test_infer_taxon_rank(name: str, rank: str) -> None:
+     assert infer_taxon_rank(name) == rank
+ 
+ 
+-def test_expand_abbreviated_genera():
++def test_expand_abbreviated_genera() -> None:
+     recs = [{"verbatimScientificName": n} for n in ("Myotis ater", "M. ater", "Murina sp.", "R. ferrum")]
+     # "M." is ambiguous (Myotis, Murina) -> untouched; "R." has no spelled-out genus
+     assert expand_abbreviated_genera(recs) == 0
+@@ -50,13 +50,13 @@ def test_expand_abbreviated_genera():
+     assert recs[1]["verbatimScientificName"] == "Homo neanderthalensis"
+ 
+ 
+-def _model_output(*rows: dict) -> str:
++def _model_output(*rows: dict[str, str]) -> str:
+     lines = ["\t".join(MODEL_COLUMNS)]
+     lines += ["\t".join(r.get(c, "") for c in MODEL_COLUMNS) for r in rows]
+     return "\n".join(lines)
+ 
+ 
+-def test_to_ets_records_fills_deterministic_columns():
++def test_to_ets_records_fills_deterministic_columns() -> None:
+     text = _model_output(
+         {
+             "references": "Cit.",
+@@ -81,13 +81,13 @@ def test_to_ets_records_fills_deterministic_columns():
+     assert {r["references"] for r in override.records} == {"Verified citation."}
+ 
+ 
+-def test_to_ets_records_bad_output_never_raises():
++def test_to_ets_records_bad_output_never_raises() -> None:
+     res = to_ets_records("I could not find any traits.", complete=False)
+     assert isinstance(res.records, list)
+     assert res.warnings and not res.complete
+ 
+ 
+-def test_json_round_trip():
++def test_json_round_trip() -> None:
+     res = to_ets_records(_model_output({"references": "C.", "verbatimScientificName": "Mus spretus"}))
+     payload = json.loads(res.to_json())
+     assert payload["complete"] is True and payload["records"][0]["author"] == "BioParser"
+diff --git a/tests/test_real_data.py b/tests/test_real_data.py
+index 4fdb350ceca1f736400aafd4622436a1ef227d27..62ad1f2a32919acf9f95d298677b6cf5cdde41d6 100644
+--- a/tests/test_real_data.py
++++ b/tests/test_real_data.py
+@@ -13,20 +13,21 @@ import pytest
+ 
+ from bioparser_ft.postprocess import infer_taxon_rank
+ from bioparser_ft.schema import MODEL_COLUMNS
+-from bioparser_ft.tsv import parse_model_tsv, read_ets_tsv, to_model_tsv
++from bioparser_ft.tsv import EtsTable, parse_model_tsv, read_ets_tsv, to_model_tsv
+ 
+ ETS_DIR = os.environ.get("BIOPARSER_ETS_DIR")
+ pytestmark = pytest.mark.skipif(not ETS_DIR, reason="set BIOPARSER_ETS_DIR to the client TSV folder")
+ 
+ 
+ @pytest.fixture(scope="module")
+-def tables():
++def tables() -> list[EtsTable]:
++    assert ETS_DIR is not None
+     paths = sorted(Path(ETS_DIR).glob("*.tsv"))
+     assert paths, f"no .tsv files in {ETS_DIR}"
+     return [read_ets_tsv(p) for p in paths]
+ 
+ 
+-def test_every_file_reads_and_round_trips(tables):
++def test_every_file_reads_and_round_trips(tables: list[EtsTable]) -> None:
+     total = 0
+     for t in tables:
+         parsed = parse_model_tsv(to_model_tsv(t.records))
+@@ -36,15 +37,15 @@ def test_every_file_reads_and_round_trips(tables):
+     print(f"\n{len(tables)} files, {total} records round-trip losslessly")
+ 
+ 
+-def test_no_cell_breaks_the_model_dialect(tables):
++def test_no_cell_breaks_the_model_dialect(tables: list[EtsTable]) -> None:
+     for t in tables:
+         for r in t.records:
+             assert not any("\t" in v or "\n" in v or "\r" in v for v in r.values()), t.path.name
+ 
+ 
+-def test_taxon_rank_rule_agreement(tables):
++def test_taxon_rank_rule_agreement(tables: list[EtsTable]) -> None:
+     agree = total = 0
+-    misses: Counter = Counter()
++    misses: Counter[tuple[str, str, str]] = Counter()
+     for t in tables:
+         for r in t.records:
+             if not r["taxonRank"]:
+@@ -60,8 +61,10 @@ def test_taxon_rank_rule_agreement(tables):
+     assert agree / total > 0.995
+ 
+ 
+-def test_vocabularies_are_canonical(tables):
+-    seen = {c: Counter() for c in ("taxonRank", "sex", "lifeStage", "statisticalMethod")}
++def test_vocabularies_are_canonical(tables: list[EtsTable]) -> None:
++    seen: dict[str, Counter[str]] = {
++        c: Counter() for c in ("taxonRank", "sex", "lifeStage", "statisticalMethod")
++    }
+     for t in tables:
+         for r in t.records:
+             for c in seen:
+diff --git a/tests/test_tsv.py b/tests/test_tsv.py
+index 8ef2c04d5b0a36ab41e36471e46846cc716e919c..8edc1c266e29fcf3b0337723d15b75e014c1f779 100644
+--- a/tests/test_tsv.py
++++ b/tests/test_tsv.py
+@@ -8,7 +8,7 @@ from bioparser_ft.schema import DOCUMENT_COLUMNS, MODEL_COLUMNS, MODEL_HEADER
+ from bioparser_ft.tsv import normalize_cell, parse_model_tsv, read_ets_tsv, to_ets_tsv, to_model_tsv
+ 
+ 
+-def test_normalize_cell():
++def test_normalize_cell() -> None:
+     assert normalize_cell("mm ") == "mm"
+     assert normalize_cell(" 0.1 mm") == "0.1 mm"
+     assert normalize_cell("a\tb") == "a b"
+@@ -18,7 +18,7 @@ def test_normalize_cell():
+     assert normalize_cell(None) == ""
+ 
+ 
+-def test_read_ets_handles_excel_quoting(tmp_path: Path):
++def test_read_ets_handles_excel_quoting(tmp_path: Path) -> None:
+     table = read_ets_tsv(write_ets(tmp_path / "a.tsv", paper_a_rows()))
+     assert not table.warnings
+     r0, r1, r2 = table.records
+@@ -32,7 +32,7 @@ def test_read_ets_handles_excel_quoting(tmp_path: Path):
+     assert r2["sex"] == "Mixed" and r2["measurementAccuracy"] == "0.1 g"
+ 
+ 
+-def test_model_tsv_format(tmp_path: Path):
++def test_model_tsv_format(tmp_path: Path) -> None:
+     records = read_ets_tsv(write_ets(tmp_path / "a.tsv", paper_a_rows())).records
+     text = to_model_tsv(records)
+     lines = text.split("\n")
+@@ -44,14 +44,14 @@ def test_model_tsv_format(tmp_path: Path):
+     assert "author" not in lines[0].split("\t")
+ 
+ 
+-def test_round_trip(tmp_path: Path):
++def test_round_trip(tmp_path: Path) -> None:
+     records = read_ets_tsv(write_ets(tmp_path / "a.tsv", paper_a_rows())).records
+     parsed = parse_model_tsv(to_model_tsv(records))
+     assert parsed.header_ok and not parsed.warnings and parsed.malformed_rows == 0
+     assert parsed.records == [{c: r[c] for c in MODEL_COLUMNS} for r in records]
+ 
+ 
+-def test_ets_export_has_all_columns(tmp_path: Path):
++def test_ets_export_has_all_columns(tmp_path: Path) -> None:
+     records = read_ets_tsv(write_ets(tmp_path / "a.tsv", paper_a_rows())).records
+     lines = to_ets_tsv(records).splitlines()
+     assert len(lines) == 4 and lines[0].split("\t")[-2] == "author"
+@@ -65,7 +65,7 @@ def _row(**cells: str) -> list[str]:
+     return [cells.get(c, "") for c in MODEL_COLUMNS]
+ 
+ 
+-def test_parse_repairs_and_warnings():
++def test_parse_repairs_and_warnings() -> None:
+     good = _row(references="Cit.", verbatimScientificName="Canis lupus", verbatimTraitValue="1.5")
+     second = _row(verbatimScientificName="Canis lupus", verbatimTraitValue="2.5")
+     text = "<think>\n\n</think>\n\n```tsv\n" + _tsv(list(MODEL_COLUMNS), good, second) + "\n```"
+@@ -84,7 +84,7 @@ def test_parse_repairs_and_warnings():
+     assert not no_header.header_ok and no_header.records[0]["verbatimTraitValue"] == "1.5"
+ 
+ 
+-def test_parse_maps_reordered_header_by_name():
++def test_parse_maps_reordered_header_by_name() -> None:
+     cols = ["verbatimTraitValue", "verbatimScientificName", "author", "references"]
+     p = parse_model_tsv(_tsv(cols, ["3.3", "Mus spretus", "X", "Cit."]))
+     assert p.records[0]["verbatimTraitValue"] == "3.3"
+@@ -92,5 +92,5 @@ def test_parse_maps_reordered_header_by_name():
+     assert "author" not in p.records[0]  # never taken from the model
+ 
+ 
+-def test_document_columns_are_known():
++def test_document_columns_are_known() -> None:
+     assert set(DOCUMENT_COLUMNS) <= set(MODEL_COLUMNS)
+diff --git a/uv.lock b/uv.lock
+index 5547cb29bd3fa31e786fbf955c8b7dc18d33baec..aa3ecdbf8b1a32d13d8acabb0258a66b3e91f7a3 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -174,6 +174,50 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/ed/c9/d7977eaacb9df673210491da99e6a247e93df98c715fc43fd136ce1d3d33/arrow-1.4.0-py3-none-any.whl", hash = "sha256:749f0769958ebdc79c173ff0b0670d59051a535fa26e8eba02953dc19eb43205", size = 68797, upload-time = "2025-10-18T17:46:45.663Z" },
+ ]
+ 
++[[package]]
++name = "ast-serialize"
++version = "0.13.1"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/21/d5/5dc1ee8a80c3b20a0b63c61b43ba6bc53517faecd1def47bcd752d22268e/ast_serialize-0.13.1.tar.gz", hash = "sha256:401cc84e8888d4d76f2c8d296fa006ed1a5ff993b6aff90dd777c03973efd025", size = 955137, upload-time = "2026-10-17T00:04:17.183Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/2b/e2/b0c140fe50fa39dd249e382f7733af6f816c90021fe7959a0b026f86237f/ast_serialize-0.13.1-cp315-abi3.abi3t-macosx_10_12_x86_64.whl", hash = "sha256:23d768369b89d551077dc173da6892fad00443338417523b6732f4e8ba4a7ed5", size = 1236160, upload-time = "2026-10-17T00:03:21.945Z" },
++    { url = "https://files.pythonhosted.org/packages/23/c4/a8a2ca21e3943555b48221f8fba546877a7ad39efaf6505506524967d7c4/ast_serialize-0.13.1-cp315-abi3.abi3t-macosx_11_0_arm64.whl", hash = "sha256:68f8829d114dab6c9db4a8bbb8d0e342958faee1b5e15a29022678df639960f8", size = 1222214, upload-time = "2026-10-17T00:03:23.462Z" },
++    { url = "https://files.pythonhosted.org/packages/15/19/2f58f2ba64e4799b39de85c140aef09a03aa6ea53be75dd292a9d9b9d8ae/ast_serialize-0.13.1-cp315-abi3.abi3t-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:4e385b17d5bde892a6184003a9aff3518387908b73f8f5ea539313c07c8c0ede", size = 1282979, upload-time = "2026-10-17T00:03:24.695Z" },
++    { url = "https://files.pythonhosted.org/packages/b1/af/ca6087fe84210c1ccd43e3182917bb70649fa1e69745a90c1d59ba08fea8/ast_serialize-0.13.1-cp315-abi3.abi3t-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:02686b281ec9b8e9614f6f0db27e12e4cac515f336c5d05b678bc9eb73ff2af5", size = 1288596, upload-time = "2026-10-17T00:03:26.04Z" },
++    { url = "https://files.pythonhosted.org/packages/b0/2c/4ef964c763329a0347125e745ec0451ba4fbaceec9efe2ac729b7cd55f17/ast_serialize-0.13.1-cp315-abi3.abi3t-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:a8ab2c2585b2e22e48cd4aff2136fce4eab4ced569b85f150ef9a5a5d6f34d49", size = 1545540, upload-time = "2026-10-17T00:03:27.52Z" },
++    { url = "https://files.pythonhosted.org/packages/bb/85/aa961dbb75813cfa94de0ce9a16a9510c226b95f604c405421e727f44bb0/ast_serialize-0.13.1-cp315-abi3.abi3t-manylinux_2_17_s390x.manylinux2014_s390x.whl", hash = "sha256:c652d9f5d52d8b81eff3ff2c95c9dd0f281de45f6ad5d3fa95527550c396454a", size = 1309374, upload-time = "2026-10-17T00:03:29.091Z" },
++    { url = "https://files.pythonhosted.org/packages/b4/e6/f2b67c327d9f9533e41791804403ccc2dc457821195a2e51f0b587a90b90/ast_serialize-0.13.1-cp315-abi3.abi3t-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:121e1d08d58b75c15491cc3003609cbad71ac2b0016043c36d30a6b2032b6605", size = 1303466, upload-time = "2026-10-17T00:03:30.451Z" },
++    { url = "https://files.pythonhosted.org/packages/73/1d/33f18b81d1bb1f5d682943ea92fda8130a6593627f12f6201668d40824fd/ast_serialize-0.13.1-cp315-abi3.abi3t-manylinux_2_31_riscv64.whl", hash = "sha256:30cf89b6a6844542d116c758725d13de5b97b9410a51ee577715f761270d0c1c", size = 1300576, upload-time = "2026-10-17T00:03:32.102Z" },
++    { url = "https://files.pythonhosted.org/packages/25/cb/64914144925f1a4abdd9217e717b122255c38fc5ebe4342f92052f3bacbc/ast_serialize-0.13.1-cp315-abi3.abi3t-manylinux_2_5_i686.manylinux1_i686.whl", hash = "sha256:732aaae9e498c973fc63fd7f308009b57c4afa6ff59d0b674d894e57d0bca01a", size = 1355960, upload-time = "2026-10-17T00:03:33.676Z" },
++    { url = "https://files.pythonhosted.org/packages/ee/80/bd29379fab2bce19adc0bf9177002b11b23dfe8d8fecf409998b458b4624/ast_serialize-0.13.1-cp315-abi3.abi3t-musllinux_1_2_aarch64.whl", hash = "sha256:d9c1a920b2aa0c1e016bed7721689717034ca0dba64ac3a3ff243b003d4e8dd8", size = 1459779, upload-time = "2026-10-17T00:03:35.09Z" },
++    { url = "https://files.pythonhosted.org/packages/83/89/012dbe733de05ffdf8e40ca0f9fa5d417cb16ec93a74463c57c001914198/ast_serialize-0.13.1-cp315-abi3.abi3t-musllinux_1_2_armv7l.whl", hash = "sha256:847cad4c22953823f5e76d0b126c6f9da670cfa45b1df41b9324e22189d77611", size = 1563399, upload-time = "2026-10-17T00:03:37.285Z" },
++    { url = "https://files.pythonhosted.org/packages/69/37/ee4bcb0358bee38744eb0f18560446572d095fe3bf6b63d6f739d08a839c/ast_serialize-0.13.1-cp315-abi3.abi3t-musllinux_1_2_i686.whl", hash = "sha256:aca07de3ca8e3d9f2b716c3c31f4f384fe4bd2d03e09912417cff7a3e08036f7", size = 1558808, upload-time = "2026-10-17T00:03:38.711Z" },
++    { url = "https://files.pythonhosted.org/packages/54/1c/ff44c5355251d61ef22934c4430bb31a61de4781d25a992154aac9b8c82a/ast_serialize-0.13.1-cp315-abi3.abi3t-musllinux_1_2_ppc64le.whl", hash = "sha256:5db12d843d931b9d1f1519ce66b9cbfe72d8563b75c1204d255322254d1964dd", size = 1666324, upload-time = "2026-10-17T00:03:40.376Z" },
++    { url = "https://files.pythonhosted.org/packages/c8/bb/6da4bfc8aa3403e6447607131bf3463acaf954d990c6c8b6787c1902ddfe/ast_serialize-0.13.1-cp315-abi3.abi3t-musllinux_1_2_riscv64.whl", hash = "sha256:fb8021f4dc3296de18737e3b8b34994411da725374d74a0b9eb32a738f2a23d0", size = 1474089, upload-time = "2026-10-17T00:03:41.715Z" },
++    { url = "https://files.pythonhosted.org/packages/21/97/897e33bef2eefd880e6350e375cc66bc5bcd00a139be480fd655f5b3f095/ast_serialize-0.13.1-cp315-abi3.abi3t-musllinux_1_2_x86_64.whl", hash = "sha256:0d764913374ba21df8cd618045b371ed104ce55c6276de7c59e554a4f5ba26fd", size = 1501542, upload-time = "2026-10-17T00:03:43.08Z" },
++    { url = "https://files.pythonhosted.org/packages/8d/4c/821211ac83870c27e4412381b7c7838336456b40575bf840e4680b2018d9/ast_serialize-0.13.1-cp315-abi3.abi3t-win32.whl", hash = "sha256:2bad302ae2427454ef9dab71bd5c3ad67188860c39d36daee38f72031edb39c4", size = 1126118, upload-time = "2026-10-17T00:03:44.616Z" },
++    { url = "https://files.pythonhosted.org/packages/1f/86/2b2d5e6c4fa352874a80618e742ffd32d249dee6c119f4233b51afc6b8f4/ast_serialize-0.13.1-cp315-abi3.abi3t-win_amd64.whl", hash = "sha256:032b09d86c785c3984e975378b7861f2a68ac44e22ba7b07b93a536b2524eeb8", size = 1163766, upload-time = "2026-10-17T00:03:45.986Z" },
++    { url = "https://files.pythonhosted.org/packages/77/a3/d610cfcdabaa44fd62a54ca1fc57a7dba120643798b089a14914973562de/ast_serialize-0.13.1-cp315-abi3.abi3t-win_arm64.whl", hash = "sha256:929eda0c419e622ab49df3a4c45f81c57dcc10874bbad55d0470a4a03324dac3", size = 1134043, upload-time = "2026-10-17T00:03:48.453Z" },
++    { url = "https://files.pythonhosted.org/packages/81/92/d705be88ff452b9ba0088b554a0cbd308fd01879da092b33fd2ad7d1aa60/ast_serialize-0.13.1-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:4bcf1d5f4eefecaa325a34ecf079b2741189e7d0821523f92cb343a389a67489", size = 1242416, upload-time = "2026-10-17T00:03:51.521Z" },
++    { url = "https://files.pythonhosted.org/packages/60/c2/98370845a7f35cb8a25782e78284b48e01bf3128339881d48d613f304f8f/ast_serialize-0.13.1-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:1b158f1c9e3a0d386913924c57995d6df78224868a4d0f215bdd41587c97b34a", size = 1229729, upload-time = "2026-10-17T00:03:52.825Z" },
++    { url = "https://files.pythonhosted.org/packages/d8/8b/2d7ffed76addd9d3fcf37fb171400942735c8912264c763561a85407f6a8/ast_serialize-0.13.1-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:77a6201b69ce42e919f2fd9a559138d5410b5d8afff7c3a6b1f500b0481ff7d8", size = 1292255, upload-time = "2026-10-17T00:03:54.148Z" },
++    { url = "https://files.pythonhosted.org/packages/6b/2a/bb9e0e719d89cc950fadfcfcc9cb4bc7640419c4228c852f031ab8abf440/ast_serialize-0.13.1-cp39-abi3-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:6eb0be64c9b8f1ed26637eef345abe75ea90351c92c85a8aec7838b3af971011", size = 1298501, upload-time = "2026-10-17T00:03:55.559Z" },
++    { url = "https://files.pythonhosted.org/packages/7a/32/13ce07dce48226f5bd9cfd8f708ec101a8be05aa430cda4918ce31ce8c82/ast_serialize-0.13.1-cp39-abi3-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:7f2427bddfca208e84de700044fadf9aef2769a70bae740a1bdabb89ee9e1117", size = 1553758, upload-time = "2026-10-17T00:03:56.952Z" },
++    { url = "https://files.pythonhosted.org/packages/e2/fb/9b51d186db0c20ca28cbaaefd50f03b573c89327b9a2627820cbce22196b/ast_serialize-0.13.1-cp39-abi3-manylinux_2_17_s390x.manylinux2014_s390x.whl", hash = "sha256:88df960e67184a71874e5b2ee014f87d1254a0dbc1f903c7bd7b1ab7733ecaef", size = 1318258, upload-time = "2026-10-17T00:03:58.418Z" },
++    { url = "https://files.pythonhosted.org/packages/c5/fa/da311559dd3dae9af5825cf21660775a929b970f72e3786af3f2cd667944/ast_serialize-0.13.1-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:9f99786e0d62082a5b121b3437f3167562133711df22128de1e9886f57f0b226", size = 1313260, upload-time = "2026-10-17T00:04:00.194Z" },
++    { url = "https://files.pythonhosted.org/packages/2b/11/97a4b9e5b4776d72f47fcd9a09a497bbf68ec8c1ae074307a2c51e410d85/ast_serialize-0.13.1-cp39-abi3-manylinux_2_31_riscv64.whl", hash = "sha256:a01b515b25a03184eff4acef25b981ae007916379682e908fc8785b342a0bf3e", size = 1309992, upload-time = "2026-10-17T00:04:01.575Z" },
++    { url = "https://files.pythonhosted.org/packages/2e/c4/62f85121a80cd451ef04f550cf0f7ea0ad9ff46cc4e9a5b9ae439b6527b1/ast_serialize-0.13.1-cp39-abi3-manylinux_2_5_i686.manylinux1_i686.whl", hash = "sha256:29422d7bcd9e7f39411571c36cec45ce8a7a9b3ad4b2e7aa64497c15a9e397f6", size = 1362715, upload-time = "2026-10-17T00:04:02.881Z" },
++    { url = "https://files.pythonhosted.org/packages/c1/fa/c5f4a545f72a7681e3295bab6e3600ee0862ec4391bed961fe9f735b67e0/ast_serialize-0.13.1-cp39-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:6ffb0f548a7dc126067fdfb7b2325ab5dfcdeecc29faf5e0f0461c96d6ebfa3d", size = 1469931, upload-time = "2026-10-17T00:04:04.181Z" },
++    { url = "https://files.pythonhosted.org/packages/38/a9/65aed4f8fa7a001a7cfdc03e68e844517ab041ba6fb614b7d78a1d6ac056/ast_serialize-0.13.1-cp39-abi3-musllinux_1_2_armv7l.whl", hash = "sha256:2876444a5f87a7c76f371af3c07c2fda563a08bc8af52568df812e8aba4bf568", size = 1570945, upload-time = "2026-10-17T00:04:05.778Z" },
++    { url = "https://files.pythonhosted.org/packages/fb/8c/44b2da991cede79bfbf52089f33a5f0168945466b3d9cd38b5dcf08e7130/ast_serialize-0.13.1-cp39-abi3-musllinux_1_2_i686.whl", hash = "sha256:885a62ec6481ce58ab24c6357360d7a82023b62dd7e5e7ceccf59e9662a3272b", size = 1569978, upload-time = "2026-10-17T00:04:07.347Z" },
++    { url = "https://files.pythonhosted.org/packages/46/e4/109b2a5beca700237767d5add920c2f8e1ba9bd5799b0faf143d0e9cf4ef/ast_serialize-0.13.1-cp39-abi3-musllinux_1_2_ppc64le.whl", hash = "sha256:2015fd0165e463aac3b1aadc6a1fa1e5820c14ca950821f4fe02f8a3f6a388d6", size = 1676082, upload-time = "2026-10-17T00:04:08.7Z" },
++    { url = "https://files.pythonhosted.org/packages/73/e0/7df70f6dbb11b5762da5416318f08316a1c51348e0d69ec79ca5f98f836a/ast_serialize-0.13.1-cp39-abi3-musllinux_1_2_riscv64.whl", hash = "sha256:eb41e1906502ac80d24ff343f45008552a3f5b5158607959fe6a07dbfc6eb037", size = 1483207, upload-time = "2026-10-17T00:04:10.162Z" },
++    { url = "https://files.pythonhosted.org/packages/1f/bc/523aa1c08bd69b5654621beb3dc1a9035715a4a63762fb8d219d6fb3eb81/ast_serialize-0.13.1-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:ca9acc67f796aa2554fa3037dccc022a4b08b38b2ad153edfac9c9bb7cb1f3c6", size = 1512140, upload-time = "2026-10-17T00:04:11.589Z" },
++    { url = "https://files.pythonhosted.org/packages/66/83/6607060659998f00afdea0d8375c1e6e2b7d515ab905090d9a5a02f48851/ast_serialize-0.13.1-cp39-abi3-win32.whl", hash = "sha256:4f98da562e5901d69c7dd30885594c5438f859edf354e9ac7517d188fb026c3a", size = 1131889, upload-time = "2026-10-17T00:04:12.953Z" },
++    { url = "https://files.pythonhosted.org/packages/9f/6f/bafd6490fe7b355627fabe95f4417e3d02da93102c8552550eb9a0774e1e/ast_serialize-0.13.1-cp39-abi3-win_amd64.whl", hash = "sha256:ddf7cbc9c8abf70102c4a088efe154bb86bfb825b0a10e556d2b15972cf99bd7", size = 1171153, upload-time = "2026-10-17T00:04:14.362Z" },
++    { url = "https://files.pythonhosted.org/packages/11/25/4235f4b375a67a37ac595bf478a5407a744eaf7b64113c1c3a5432b8d954/ast_serialize-0.13.1-cp39-abi3-win_arm64.whl", hash = "sha256:48f11d96c9ec71119612f8e79a8c55c12f2b136716d68347433c561d27a25f43", size = 1139035, upload-time = "2026-10-17T00:04:15.767Z" },
++]
++
+ [[package]]
+ name = "asttokens"
+ version = "3.0.2"
+@@ -291,6 +335,15 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/01/9a/11f687cb39d6a3504060d5242f04f48c735afb4d3d533958a20594890cb2/cffi-2.1.1-cp313-cp313-win_arm64.whl", hash = "sha256:63bbfd5ded17c4840ac07cd8f1c21ba9d9708141f840b324f422f41b207e3973", size = 180078, upload-time = "2026-08-03T21:20:15.917Z" },
+ ]
+ 
++[[package]]
++name = "cfgv"
++version = "3.5.0"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/4e/b5/721b8799b04bf9afe054a3899c6cf4e880fcf8563cc71c15610242490a0c/cfgv-3.5.0.tar.gz", hash = "sha256:d5b1034354820651caa73ede66a6294d6e95c1b00acc5e9b098e917404669132", size = 7334, upload-time = "2025-11-19T20:55:51.612Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/db/3c/33bac158f8ab7f89b2e59426d5fe2e4f63f7ed25df84c036890172b412b5/cfgv-3.5.0-py2.py3-none-any.whl", hash = "sha256:a8dc6b26ad22ff227d2634a65cb388215ce6cc96bbcc5cfde7641ae87e8dacc0", size = 7445, upload-time = "2025-11-19T20:55:50.744Z" },
++]
++
+ [[package]]
+ name = "charset-normalizer"
+ version = "3.5.2"
+@@ -521,6 +574,15 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/1e/77/dc8c558f7593132cf8fefec57c4f60c83b16941c574ac5f619abb3ae7933/dill-0.4.1-py3-none-any.whl", hash = "sha256:1e1ce33e978ae97fcfcff5638477032b801c46c7c65cf717f95fbc2248f79a9d", size = 120019, upload-time = "2026-01-19T02:36:55.663Z" },
+ ]
+ 
++[[package]]
++name = "distlib"
++version = "0.4.4"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/68/bc/d36966de7304047a1001a7559fbf266c464bb5d8cc85464536ef8c9bcc32/distlib-0.4.4.tar.gz", hash = "sha256:ca4175b4ac7f71223cc30ed7248c45d2b38c2439d8ee6e498ab67ed63cf3508d", size = 621304, upload-time = "2026-10-16T13:56:34.203Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/c1/2b/238f02a4927fa2e27aa995371d240a468b52e42eae44a678434aff736b38/distlib-0.4.4-py2.py3-none-any.whl", hash = "sha256:cf09d55b1e85a89576b036aeb71550bfd68320f3f21761ca329eadadad918638", size = 472099, upload-time = "2026-10-16T13:56:32.053Z" },
++]
++
+ [[package]]
+ name = "docstring-parser"
+ version = "0.18.0"
+@@ -603,6 +665,8 @@ dependencies = [
+ 
+ [package.dev-dependencies]
+ dev = [
++    { name = "mypy" },
++    { name = "pre-commit" },
+     { name = "pytest" },
+     { name = "ruff" },
+ ]
+@@ -634,8 +698,10 @@ requires-dist = [
+ 
+ [package.metadata.requires-dev]
+ dev = [
+-    { name = "pytest", specifier = ">=8.3" },
+-    { name = "ruff", specifier = ">=0.12" },
++    { name = "mypy", specifier = ">=2.3.1" },
++    { name = "pre-commit", specifier = ">=4.6.2" },
++    { name = "pytest", specifier = ">=9.1.1" },
++    { name = "ruff", specifier = ">=0.16.5" },
+ ]
+ fetch = [
+     { name = "beautifulsoup4", specifier = ">=4.12" },
+@@ -836,6 +902,15 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/fc/16/963096d224b80909432dc16561a615fd33d2d13beef3ce4c63fa25e40867/huggingface_hub-1.33.0-py3-none-any.whl", hash = "sha256:04e434b06e100eddbce9a6e817d72693a7884b10a79bd67ab48080d5c07eb899", size = 846435, upload-time = "2026-09-24T09:49:28.059Z" },
+ ]
+ 
++[[package]]
++name = "identify"
++version = "2.6.20"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/53/35/d70c0006c7cee65999ea94a6273e60b2094f600a3d8b71b04318253fc643/identify-2.6.20.tar.gz", hash = "sha256:ad729860a923858d26917c2f4fb0a1d83d27a75b1e090c06440c573f048f3285", size = 99681, upload-time = "2026-09-26T20:29:07.187Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/fa/70/fffc9613501877c0a10a1ef73a165e6ded3e53f6e7502227fef56d973933/identify-2.6.20-py2.py3-none-any.whl", hash = "sha256:6a16b69b93187244e0548cbfd25b3e4a6f9a7a2ad784625c3bec2b8d27b81aaa", size = 99506, upload-time = "2026-09-26T20:29:06.054Z" },
++]
++
+ [[package]]
+ name = "idna"
+ version = "3.20"
+@@ -1217,6 +1292,30 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/82/3d/14ce75ef66813643812f3093ab17e46d3a206942ce7376d31ec2d36229e7/lark-1.3.1-py3-none-any.whl", hash = "sha256:c629b661023a014c37da873b4ff58a817398d12635d3bbb2c5a03be7fe5d1e12", size = 113151, upload-time = "2025-10-27T18:25:54.882Z" },
+ ]
+ 
++[[package]]
++name = "librt"
++version = "0.16.0"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/04/f5/9dc696772d241814bacac7880bac32f2930b5a6ebc1f85317b83161a011c/librt-0.16.0.tar.gz", hash = "sha256:ac38d6d8d66bf3d744148dbbc0b8e193e195a51e364ed55e224631f5721891fc", size = 219839, upload-time = "2026-09-29T00:55:32.891Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/46/cd/ae5e0e9dba45d1399aa04a5395bcc0bead40d9fa06dc903634a7b4d7473d/librt-0.16.0-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:c5e6144e68b577f157519f2ba88ca20e3ed61c29b00e5cdfa76cd2d45acf059a", size = 151036, upload-time = "2026-09-29T00:53:06.284Z" },
++    { url = "https://files.pythonhosted.org/packages/41/5a/48a16e323c5f9447a94cce7b59babf60fa04e62c3365ecf060c77ed8b320/librt-0.16.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:33f41443a1f4e1f099331b3d8120e409fbff84b9760bc1cc9ea496f37ddaa5cc", size = 155211, upload-time = "2026-09-29T00:53:07.72Z" },
++    { url = "https://files.pythonhosted.org/packages/3f/29/0f59299eb4251a409b2e690ad4b7d9f8a676db829d7817ec961f32b44f7e/librt-0.16.0-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:7e510b7770bee609617a3374a96548eb114cae048023e3f049ee449e7ff2db32", size = 502587, upload-time = "2026-09-29T00:53:09.191Z" },
++    { url = "https://files.pythonhosted.org/packages/de/ba/d6fb4ef8d1537c396079d72289f16be7cd35a366e5065c51253fea2760b6/librt-0.16.0-cp313-cp313-manylinux2014_i686.manylinux_2_17_i686.manylinux_2_28_i686.whl", hash = "sha256:efc49c462d4516b8a58b00b490078fa64689fd1fe66970cc190131d7afb8027e", size = 496146, upload-time = "2026-09-29T00:53:11.016Z" },
++    { url = "https://files.pythonhosted.org/packages/52/fc/8c50dd4d7cc97c0ee8f252c8a3104980f234391cf1519b554e8b9de08b60/librt-0.16.0-cp313-cp313-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl", hash = "sha256:92caf82ebef5e12d21c72242b70d1e92536f1711cf2a727a4c276de4b4469087", size = 513336, upload-time = "2026-09-29T00:53:12.655Z" },
++    { url = "https://files.pythonhosted.org/packages/a9/59/16c409c56f708eda2db9a0553662845d45e3871c77d70a240dae3f3bdc56/librt-0.16.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:17bac7f7a16b328fff77e440287693eb017abde913595b5827ebccbc21ecd8a6", size = 531689, upload-time = "2026-09-29T00:53:14.39Z" },
++    { url = "https://files.pythonhosted.org/packages/88/82/d34772a6c29d1446dcca6e64d74062efd508523ab351aa16625a4689d5cc/librt-0.16.0-cp313-cp313-manylinux_2_34_riscv64.manylinux_2_39_riscv64.whl", hash = "sha256:5b976054553670829985ed767feb78fb6bcede0175327c4844dd5c281c1be659", size = 524537, upload-time = "2026-09-29T00:53:16.064Z" },
++    { url = "https://files.pythonhosted.org/packages/77/8f/24c5631313746131ccee53bc91fdc8374f9cf25e0082a1fee9c93bb98acc/librt-0.16.0-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:0058f9d68721094105917254c72ac0569117bb7b13b9769cf45d26d89f9d21cd", size = 543231, upload-time = "2026-09-29T00:53:17.939Z" },
++    { url = "https://files.pythonhosted.org/packages/f2/cb/5f8e0d41dbd8b499c2265e939c31acc9ba59845565bf99539ad1c06aebcf/librt-0.16.0-cp313-cp313-musllinux_1_2_i686.whl", hash = "sha256:30b7beaf3f4487b7d8adef1f158b49067cb4d5a19fa7a3bf31a4e7a820e435c5", size = 546499, upload-time = "2026-09-29T00:53:19.666Z" },
++    { url = "https://files.pythonhosted.org/packages/be/61/063052de441d1385f59cea4223f184bf9e5d125de1ae3239b490aa1e486e/librt-0.16.0-cp313-cp313-musllinux_1_2_ppc64le.whl", hash = "sha256:468df902df016a06eb0e40b0747dc8d14e47d7a38b18b63b1fb167d85cb94d63", size = 555261, upload-time = "2026-09-29T00:53:21.292Z" },
++    { url = "https://files.pythonhosted.org/packages/14/11/a2ada0529372268d6401afa9d457a095b68cd7753532b6f7f33049a19b43/librt-0.16.0-cp313-cp313-musllinux_1_2_riscv64.whl", hash = "sha256:aea7b1f2b125dad5de85f049136651bff256c883c65e6b9209b2da0a1ac3cdef", size = 536029, upload-time = "2026-09-29T00:53:23.07Z" },
++    { url = "https://files.pythonhosted.org/packages/23/9d/5bb6d38853382986dca702fc7e06c8256d30f5fa0676d882773b744610dc/librt-0.16.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:a8afb6557920860b7a3a596eb804cf37e09e7cf8a803db2478c202acc72d8c2e", size = 573748, upload-time = "2026-09-29T00:53:24.696Z" },
++    { url = "https://files.pythonhosted.org/packages/99/f6/0025cde35ff7f607684dc775a2b2d732cce2561cec050a6ee1fb2e1fc6fe/librt-0.16.0-cp313-cp313-pyemscripten_2025_0_wasm32.whl", hash = "sha256:77c7a2b4fe2c1369e0d5aa1cade26740a7b14be32fbc9a5535d617d20065c39d", size = 79861, upload-time = "2026-09-29T00:53:26.089Z" },
++    { url = "https://files.pythonhosted.org/packages/93/93/303b8592909bd583f83f02818ffbea3f7647ca1e22b1cd5465d04b8145fe/librt-0.16.0-cp313-cp313-win32.whl", hash = "sha256:02d89c813d5ff74b17df72d3a34819d132cd168e56b81bf755b809bd9e46b8c4", size = 106236, upload-time = "2026-09-29T00:53:27.43Z" },
++    { url = "https://files.pythonhosted.org/packages/cf/24/80bbb463c60ed18e29cb26aba386ddb76609580e4e7160710e550587018c/librt-0.16.0-cp313-cp313-win_amd64.whl", hash = "sha256:14ed6ebe3e4f85f326d7920011ad30ff49ed9334e62cf88caef9ba973d9e3a92", size = 126180, upload-time = "2026-09-29T00:53:28.7Z" },
++    { url = "https://files.pythonhosted.org/packages/43/80/b1a6fbdd7da825cdd55c71aa81eb6cfa82c513c360774152eacb50b4a771/librt-0.16.0-cp313-cp313-win_arm64.whl", hash = "sha256:83d4041a3d9b2fd053a8a4e1f22878b3e5833e2712956382d5c048d791454e91", size = 116557, upload-time = "2026-09-29T00:53:30.012Z" },
++]
++
+ [[package]]
+ name = "markdown-it-py"
+ version = "4.2.0"
+@@ -1441,6 +1540,37 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/7e/82/69e539c4c2027f1e1697e09aaa2449243085a0edf81ae2c6341e84d769b6/multiprocess-0.70.19-py39-none-any.whl", hash = "sha256:0d4b4397ed669d371c81dcd1ef33fd384a44d6c3de1bd0ca7ac06d837720d3c5", size = 133477, upload-time = "2026-01-19T06:47:38.619Z" },
+ ]
+ 
++[[package]]
++name = "mypy"
++version = "2.4.1"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "ast-serialize" },
++    { name = "librt", marker = "platform_python_implementation != 'PyPy'" },
++    { name = "mypy-extensions" },
++    { name = "pathspec" },
++    { name = "typing-extensions" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/4a/3c/78ecece71ee4b5445389a4ccd11627cfb9c69e4de554d11060171f376305/mypy-2.4.1.tar.gz", hash = "sha256:63b590965691e540a335fa74dadf31a7069142f6b72e234689bbd244edf55623", size = 4066728, upload-time = "2026-10-28T19:23:13.286Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/6a/65/cd19bc06b67d2df4828220245fd98569ba40fac00c60ba48bef1817d8ac3/mypy-2.4.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:3f1613bfe6726169a5680ec3dad5fe1f6d96285c12aded51ad432eadedd39d45", size = 14214179, upload-time = "2026-10-28T19:22:27.49Z" },
++    { url = "https://files.pythonhosted.org/packages/c9/db/4d54ca4f49a0113d0c956980272aefdc6eec5458f7a72b350785b9ef2249/mypy-2.4.1-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:680ba5d9f0e3fe0c746b3d14df15f2a718e4bc308a1145616a1ea691ce7c354b", size = 14376217, upload-time = "2026-10-28T19:21:08.019Z" },
++    { url = "https://files.pythonhosted.org/packages/a2/45/089b4724b85f0f408941be5298f817ee89181c1ce031a73d60ebb150c2c7/mypy-2.4.1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:1fb70621535c22fd4b1a0450d37ed1d6c5eb39656a1cebfb189084c12de54ba7", size = 15467623, upload-time = "2026-10-28T19:21:21.555Z" },
++    { url = "https://files.pythonhosted.org/packages/27/4c/15edbc64b0b1412bfe94c74192b3b56554ab642b85a31bb06cef6313101f/mypy-2.4.1-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:4af5ad558033bf71a44a1be149ed61633522824f84c1b6bc2445d3fe2d2a5296", size = 15729867, upload-time = "2026-10-28T19:21:37.557Z" },
++    { url = "https://files.pythonhosted.org/packages/76/5b/7d160fb685994b65b0ca86d352f3afb5424f96a9e6914719f7b861fb6701/mypy-2.4.1-cp313-cp313-win_amd64.whl", hash = "sha256:acdd82cb3a2eb10720e87706a128d75785d005a8c47e36a4973221524f41fc56", size = 11390802, upload-time = "2026-10-28T19:22:18.081Z" },
++    { url = "https://files.pythonhosted.org/packages/9a/ea/453d27f8d531f57c5f14aa73094eaa48e3fb77f680bdede2045cb64fa58b/mypy-2.4.1-cp313-cp313-win_arm64.whl", hash = "sha256:133886ef1a7a8cf673df55d865e41580c6c46aa9b8e31e1325dfe315c038f745", size = 10950427, upload-time = "2026-10-28T19:22:59.003Z" },
++    { url = "https://files.pythonhosted.org/packages/21/5c/6e8010f8f2c4ad817364592d4b3883633417269b913fc9d5174fdeb7e565/mypy-2.4.1-py3-none-any.whl", hash = "sha256:1784648d6ec8c2b5465e3f26241b845a0b3cb4e56c993c64abe16989e7698999", size = 2801286, upload-time = "2026-10-28T19:21:19.516Z" },
++]
++
++[[package]]
++name = "mypy-extensions"
++version = "1.2.0"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/d0/6f/43edf3be2748d0e40974a5ee046a8bb4c9961a4bdd3e7d5c6dcbf32d1af6/mypy_extensions-1.2.0.tar.gz", hash = "sha256:c6e275a07f1c2fc096b62940452d0eaa3f3af7de45d704787866240a7c6d5a51", size = 6566, upload-time = "2026-11-03T16:26:33.692Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/b5/99/7b1adac7e97ce7bbda34792dc6e9b2f5cc5cffd1875883f78a818b2a2687/mypy_extensions-1.2.0-py3-none-any.whl", hash = "sha256:993e7a20aa5671eb41a7132cf555af30062da99729601601b9a8382b11cae768", size = 5114, upload-time = "2026-11-03T16:26:32.731Z" },
++]
++
+ [[package]]
+ name = "nbclient"
+ version = "0.11.0"
+@@ -1523,6 +1653,15 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/7e/cd/fe58041e9011f307c490e3e17dd48cc516448f7c698a3f2d9d9d65d7e6a8/networkx-3.7-py3-none-any.whl", hash = "sha256:e3fd2c13a7814cee3746340d8d7f8598a67f16a58bf47fb7f8793fab6efca1b0", size = 2142205, upload-time = "2026-09-21T16:45:14.609Z" },
+ ]
+ 
++[[package]]
++name = "nodeenv"
++version = "1.12.0"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/e6/99/d27cfc9518f49e4cbc25c683ec7cf8704a9d31311341c291c0e78ddf791b/nodeenv-1.12.0.tar.gz", hash = "sha256:4ea7f88339310afebc3253f2c7a91b94bacf97d73a36a5c108962abdfaca501e", size = 131292, upload-time = "2026-10-31T19:03:18.847Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/2d/6a/8a9ac7d5e2f7cf53c459bfef90ebc17a2f8cd54b665af96799d4c534840e/nodeenv-1.12.0-py3-none-any.whl", hash = "sha256:80644d65c10cc2be12e3e4b54b3367ff288c7ad24ae75c2dcc65454fc7449d4d", size = 39442, upload-time = "2026-10-31T19:03:17.427Z" },
++]
++
+ [[package]]
+ name = "notebook-shim"
+ version = "0.2.4"
+@@ -1778,6 +1917,15 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/99/5d/8268b644392ee874ee82a635cd0df1773de230bde356c38de28e298392cc/parso-0.8.7-py2.py3-none-any.whl", hash = "sha256:a8926eb2a1b915486941fdbd31e86a4baf88fe8c210f25f2f35ecec5b574ca1c", size = 107025, upload-time = "2026-05-01T23:12:58.867Z" },
+ ]
+ 
++[[package]]
++name = "pathspec"
++version = "1.1.1"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/5a/82/42f767fc1c1143d6fd36efb827202a2d997a375e160a71eb2888a925aac1/pathspec-1.1.1.tar.gz", hash = "sha256:17db5ecd524104a120e173814c90367a96a98d07c45b2e10c2f3919fff91bf5a", size = 135180, upload-time = "2026-04-27T01:46:08.907Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/f1/d9/7fb5aa316bc299258e68c73ba3bddbc499654a07f151cba08f6153988714/pathspec-1.1.1-py3-none-any.whl", hash = "sha256:a00ce642f577bf7f473932318056212bc4f8bfdf53128c78bbd5af0b9b20b189", size = 57328, upload-time = "2026-04-27T01:46:07.06Z" },
++]
++
+ [[package]]
+ name = "peft"
+ version = "0.21.2"
+@@ -1868,6 +2016,22 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/40/9e/2b38731e0fc536806f16490e1a12d7f0dc2a1235aa8cc07bcc75416a7daa/pluggy-1.7.0-py3-none-any.whl", hash = "sha256:7dd7b0d8832ba3cb632c306926ded123429211b83641b35dc5c41ad2d34f9bec", size = 27082, upload-time = "2026-10-15T09:50:56.808Z" },
+ ]
+ 
++[[package]]
++name = "pre-commit"
++version = "4.7.0"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "cfgv" },
++    { name = "identify" },
++    { name = "nodeenv" },
++    { name = "pyyaml" },
++    { name = "virtualenv" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/3a/c3/6965c2690ddce885ec75121572d065a5b94c5a5d8d3e657927ecda9fd715/pre_commit-4.7.0.tar.gz", hash = "sha256:1f3deee12b914c8fa184bd2b5953391c2e4f36763e403d4a23dc9983fa7c6e86", size = 198120, upload-time = "2026-10-12T20:45:40.32Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/eb/83/ce0a196e4f7b20b11ce3aa1fc72fb973f64b7628d51c1b8aebad37fb7f81/pre_commit-4.7.0-py2.py3-none-any.whl", hash = "sha256:2e229038ad3656081b70c27913157e4b636ef306f643f024a8a8e3f0f7b2f877", size = 226261, upload-time = "2026-10-12T20:45:38.858Z" },
++]
++
+ [[package]]
+ name = "prometheus-client"
+ version = "0.26.0"
+@@ -2093,6 +2257,18 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/2f/a9/52b89563d154433d79b51ed1eb4842bf7334cb2696891a7fe135618853d7/python_dateutil-4.0.0-py3-none-any.whl", hash = "sha256:a5e246f79eb80475e691bf93862cead98decd8a498cf53ba0516fcdc0f50dc1c", size = 92853, upload-time = "2026-11-01T07:02:40.797Z" },
+ ]
+ 
++[[package]]
++name = "python-discovery"
++version = "1.9.4"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "filelock" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/0f/d7/1e94df7d1636bf00b9f261bf88a4adc0414f14931ff60511eb0f34c250d1/python_discovery-1.9.4.tar.gz", hash = "sha256:c01b45fe515c1d268b57c57d554bb0e1d320b8e9eb5490bb2f4f577be26e4380", size = 140385, upload-time = "2026-11-04T05:25:52.097Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/c5/44/b248f3b1a23f44d8de172e2767748082c41cbd9353009af72f4b11b00afa/python_discovery-1.9.4-py3-none-any.whl", hash = "sha256:b468f365040b40f4cb39918b0766d3e5a2f340968e07df752fbc96f1bb4641ab", size = 44220, upload-time = "2026-11-04T05:25:50.514Z" },
++]
++
+ [[package]]
+ name = "python-json-logger"
+ version = "4.2.0"
+@@ -2755,7 +2931,7 @@ dependencies = [
+     { name = "tyro" },
+     { name = "unsloth-zoo" },
+     { name = "wheel" },
+-    { name = "xformers", marker = "(platform_machine == 'AMD64' and 'linux' in sys_platform) or (platform_machine == 'x86_64' and 'linux' in sys_platform) or (platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'x86_64' and sys_platform == 'win32')" },
++    { name = "xformers", marker = "(platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'x86_64' and sys_platform == 'win32') or (platform_machine == 'AMD64' and 'linux' in sys_platform) or (platform_machine == 'x86_64' and 'linux' in sys_platform)" },
+ ]
+ wheels = [
+     { url = "https://files.pythonhosted.org/packages/b9/3e/1a2c6b2681d7c086993c8494ca73f866ad97687c72eace7a119f209a56ff/unsloth-2026.11.1-py3-none-any.whl", hash = "sha256:a6f9eef0010ecc6863a96d920871f47eca0cf5bd81663c764f2b46b9bf039535", size = 28988391, upload-time = "2026-11-03T14:17:42.703Z" },
+@@ -2832,6 +3008,22 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/38/0c/b54a4fdd7f90a3af8b02ebc9ce6712c2c208b7926a2f7bad95c33ebbe943/uvicorn-0.54.0-py3-none-any.whl", hash = "sha256:505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf", size = 87427, upload-time = "2026-09-25T06:52:35.829Z" },
+ ]
+ 
++[[package]]
++name = "virtualenv"
++version = "21.15.5"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "distlib" },
++    { name = "filelock" },
++    { name = "packaging" },
++    { name = "platformdirs" },
++    { name = "python-discovery" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/69/74/745e612b69ad14a534b7bc233c4574b968eb2c21a276ea172e8f0fc13f51/virtualenv-21.15.5.tar.gz", hash = "sha256:fb869ea32930530ccc87549877b53268c2a4d4a7d7f2c384042eca05170350e6", size = 5639868, upload-time = "2026-11-04T05:13:20.929Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/9d/d6/f9ac78f115e32e0d76adda9db72b74425b86495ae274cd7b58c660f5d1c1/virtualenv-21.15.5-py3-none-any.whl", hash = "sha256:bcf98c32139cf3df7f0cc2c8c48ca150645c20e66f8c4fe6c1e5e40bcae73947", size = 5680750, upload-time = "2026-11-04T05:13:19.057Z" },
++]
++
+ [[package]]
+ name = "wcwidth"
+ version = "0.9.4"

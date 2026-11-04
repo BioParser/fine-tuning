@@ -137,7 +137,7 @@ class PoliteClient:
         with self._lock:
             self._next[host] = max(self._next.get(host, 0.0), time.monotonic() + seconds)
 
-    def _slot(self, host: str) -> contextlib.AbstractContextManager:
+    def _slot(self, host: str) -> contextlib.AbstractContextManager[object]:
         if host in RESOLVERS:
             return contextlib.nullcontext()  # A redirect is fast: the publisher limits the open requests
         with self._lock:
@@ -154,7 +154,14 @@ class PoliteClient:
                 self._server_delay[host] = float(interval.group(1)) / int(limit)
 
     # ------------------------------------------------------------------ internal functions
-    def _request(self, url: str, *, params=None, headers=None, attempts: int = 3) -> httpx.Response | None:
+    def _request(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        attempts: int = 3,
+    ) -> httpx.Response | None:
         host = host_of(httpx.URL(url))
         for attempt in range(attempts):
             try:
@@ -175,7 +182,7 @@ class PoliteClient:
             return resp
         return None
 
-    def _cache_path(self, url: str, params: dict | None) -> Path | None:
+    def _cache_path(self, url: str, params: dict[str, Any] | None) -> Path | None:
         if self.cache_dir is None:
             return None
         key = hashlib.sha256(
@@ -184,7 +191,9 @@ class PoliteClient:
         return self.cache_dir / "api" / f"{key[:2]}" / f"{key}.json"
 
     # ------------------------------------------------------------------ public functions
-    def get_json(self, url: str, params: dict | None = None, headers: dict | None = None) -> Any | None:
+    def get_json(
+        self, url: str, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None
+    ) -> Any | None:
         """Send a GET request to a JSON API.
 
         Return None for a 404 answer or an error. The cache keeps the 200 and 404 answers.

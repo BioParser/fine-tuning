@@ -12,7 +12,7 @@ NOTEBOOKS = sorted((Path(__file__).parents[1] / "notebooks").glob("*.ipynb"))
 
 
 @pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda p: p.name)
-def test_notebook_has_no_outputs(path: Path):
+def test_notebook_has_no_outputs(path: Path) -> None:
     nb = json.loads(path.read_text(encoding="utf-8"))
     dirty = [i for i, c in enumerate(nb["cells"]) if c.get("outputs") or c.get("execution_count")]
     assert not dirty, f"{path.name}: clear outputs before committing (cells {dirty})"
@@ -20,7 +20,7 @@ def test_notebook_has_no_outputs(path: Path):
 
 
 @pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda p: p.name)
-def test_notebook_does_not_install_packages(path: Path):
+def test_notebook_does_not_install_packages(path: Path) -> None:
     nb = json.loads(path.read_text(encoding="utf-8"))
     for cell in nb["cells"]:
         src = "".join(cell["source"])

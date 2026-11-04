@@ -29,7 +29,8 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.3", "ruff>=0.12"]
+# The same minimum versions as the bioparser repository
+dev = ["mypy>=2.3.1", "pre-commit>=4.6.2", "pytest>=9.1.1", "ruff>=0.16.5"]
 # "lab" (previously listed) is an unrelated benchmark-experiment framework on PyPI,
 # not JupyterLab.
 notebook = ["jupyterlab>=4.4", "ipykernel>=6.29", "ipywidgets>=8.1"]
@@ -44,7 +45,7 @@ bioparser-evaluate = "bioparser_ft.evaluate:main"
 bioparser-fetch-pdfs = "bioparser_ft.fetch.cli:main"
 
 [build-system]
-requires = ["uv_build>=0.12.19,<0.13.0"]
+requires = ["uv_build>=0.12.19,<0.14.0"]
 build-backend = "uv_build"
 
 [tool.uv]
@@ -55,6 +56,10 @@ module-name = "bioparser_ft"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# CI does not install the package, because its dependencies are the GPU training stack.
+# For this reason, the tests import the package from src/.
+pythonpath = ["src"]
+addopts = "-ra"
 
 [tool.ruff]
 line-length = 110
@@ -63,3 +68,29 @@ target-version = "py313"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
 ignore = ["E501", "RUF001", "RUF002", "RUF003"] # long lines in prompt text; Unicode in docs is intended
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["src", "tests"]
+mypy_path = "src,tests"
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+# The GPU training stack. CI does not install it, and some of these packages have no type hints.
+# follow_imports = "skip" gives the same result on a computer that has the stack.
+module = [
+    "accelerate.*",
+    "bitsandbytes.*",
+    "datasets.*",
+    "huggingface_hub.*",
+    "peft.*",
+    "tokenizers.*",
+    "torch.*",
+    "transformers.*",
+    "trl.*",
+    "unsloth.*",
+    "unsloth_zoo.*",
+]
+ignore_missing_imports = true
+follow_imports = "skip"

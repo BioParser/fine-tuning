@@ -13,20 +13,21 @@ import pytest
 
 from bioparser_ft.postprocess import infer_taxon_rank
 from bioparser_ft.schema import MODEL_COLUMNS
-from bioparser_ft.tsv import parse_model_tsv, read_ets_tsv, to_model_tsv
+from bioparser_ft.tsv import EtsTable, parse_model_tsv, read_ets_tsv, to_model_tsv
 
 ETS_DIR = os.environ.get("BIOPARSER_ETS_DIR")
 pytestmark = pytest.mark.skipif(not ETS_DIR, reason="set BIOPARSER_ETS_DIR to the client TSV folder")
 
 
 @pytest.fixture(scope="module")
-def tables():
+def tables() -> list[EtsTable]:
+    assert ETS_DIR is not None
     paths = sorted(Path(ETS_DIR).glob("*.tsv"))
     assert paths, f"no .tsv files in {ETS_DIR}"
     return [read_ets_tsv(p) for p in paths]
 
 
-def test_every_file_reads_and_round_trips(tables):
+def test_every_file_reads_and_round_trips(tables: list[EtsTable]) -> None:
     total = 0
     for t in tables:
         parsed = parse_model_tsv(to_model_tsv(t.records))
@@ -36,15 +37,15 @@ def test_every_file_reads_and_round_trips(tables):
     print(f"\n{len(tables)} files, {total} records round-trip losslessly")
 
 
-def test_no_cell_breaks_the_model_dialect(tables):
+def test_no_cell_breaks_the_model_dialect(tables: list[EtsTable]) -> None:
     for t in tables:
         for r in t.records:
             assert not any("\t" in v or "\n" in v or "\r" in v for v in r.values()), t.path.name
 
 
-def test_taxon_rank_rule_agreement(tables):
+def test_taxon_rank_rule_agreement(tables: list[EtsTable]) -> None:
     agree = total = 0
-    misses: Counter = Counter()
+    misses: Counter[tuple[str, str, str]] = Counter()
     for t in tables:
         for r in t.records:
             if not r["taxonRank"]:
@@ -60,8 +61,10 @@ def test_taxon_rank_rule_agreement(tables):
     assert agree / total > 0.995
 
 
-def test_vocabularies_are_canonical(tables):
-    seen = {c: Counter() for c in ("taxonRank", "sex", "lifeStage", "statisticalMethod")}
+def test_vocabularies_are_canonical(tables: list[EtsTable]) -> None:
+    seen: dict[str, Counter[str]] = {
+        c: Counter() for c in ("taxonRank", "sex", "lifeStage", "statisticalMethod")
+    }
     for t in tables:
         for r in t.records:
             for c in seen:

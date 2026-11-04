@@ -36,13 +36,15 @@ class Candidate:
     The kind is "pdf" for a direct file, or "landing" for an HTML page that the code parses.
     """
 
-    rank: tuple = field(compare=True)
+    rank: tuple[int, int] = field(compare=True)
     url: str = field(compare=False)
     source: str = field(compare=False)
     kind: str = field(compare=False, default="pdf")
 
 
-def make_candidate(url: str | None, source: str, *, kind: str = "pdf", version: str = "", stage: int = 0):
+def make_candidate(
+    url: str | None, source: str, *, kind: str = "pdf", version: str = "", stage: int = 0
+) -> Candidate | None:
     if not url:
         return None
     # The client made the labels from the published article. For this reason, the version of record comes first.
@@ -66,9 +68,14 @@ class Resolution:
             return "given"
         return self.verdict.confidence if self.verdict else "none"
 
+    @property
+    def rank(self) -> int:
+        """Return the confidence of the match as a number. A larger number is a better match."""
+        return CONFIDENCE_ORDER[self.verdict.confidence] if self.verdict else -1
+
 
 # --------------------------------------------------------------------- functions that read API fields
-def _crossref_year(item: dict) -> int | None:
+def _crossref_year(item: dict[str, Any]) -> int | None:
     for k in ("issued", "published-print", "published-online", "created"):
         parts = (item.get(k) or {}).get("date-parts") or [[None]]
         if parts and parts[0] and parts[0][0]:
@@ -89,10 +96,10 @@ class Scholarly:
         self.core_key = os.environ.get("CORE_API_KEY")
         self.openalex_key = os.environ.get("OPENALEX_API_KEY")
 
-    def _mailto(self) -> dict:
+    def _mailto(self) -> dict[str, str]:
         return {"mailto": self.email} if self.email else {}
 
-    def _openalex_params(self, **params) -> dict:
+    def _openalex_params(self, **params: object) -> dict[str, object]:
         if self.openalex_key:
             params["api_key"] = self.openalex_key
         return params | self._mailto()
@@ -118,7 +125,7 @@ class Scholarly:
         The code always uses an override URL first.
         """
         if paper.doi:
-            res = self._given_doi(paper)
+            res = self._given_doi(paper, paper.doi)
         elif paper.url:
             res = Resolution(source="override", title=paper.title, year=paper.year, landing=[paper.url])
         else:
@@ -127,17 +134,17 @@ class Scholarly:
             res.candidates.insert(0, c)
         return res
 
-    def _given_doi(self, paper: Paper) -> Resolution:
+    def _given_doi(self, paper: Paper, doi: str) -> Resolution:
         """For a known DOI, get the correct title from Crossref.
 
         Then the PDF check compares the PDF with the real title, not with the title guess
         from the citation.
         """
-        item = (self.c.get_json(f"{CROSSREF}/{quote(paper.doi, safe='/')}", self._mailto()) or {}).get(
+        item = (self.c.get_json(f"{CROSSREF}/{quote(doi, safe='/')}", self._mailto()) or {}).get(
             "message"
         ) or {}
         return Resolution(
-            doi=paper.doi,
+            doi=doi,
             title=_first(item.get("title")) or paper.title,
             year=_crossref_year(item) or paper.year,
             source="override" if paper.overridden else "citation",
@@ -151,12 +158,9 @@ class Scholarly:
             except Exception as exc:  # An error in one API must not stop the full run
                 res = Resolution(notes=[f"{finder.__name__}: {exc!r}"])
             if res and res.verdict and res.verdict.accepted:
-                if (
-                    best is None
-                    or CONFIDENCE_ORDER[res.verdict.confidence] > CONFIDENCE_ORDER[best.verdict.confidence]
-                ):
+                if best is None or res.rank > best.rank:
                     best = res
-                if best.verdict.confidence == "high" and (best.doi or best.candidates):
+                if best.confidence == "high" and (best.doi or best.candidates):
                     break
         return best or Resolution(
             notes=["no result agrees with the citation: add a DOI or URL to doi_overrides.tsv"]
@@ -169,9 +173,7 @@ class Scholarly:
             title = _first(item.get("title"))
             authors = [a.get("family") or a.get("name") or "" for a in item.get("author", [])]
             v = self._check(paper, title, _crossref_year(item), authors)
-            if v.accepted and (
-                best is None or CONFIDENCE_ORDER[v.confidence] > CONFIDENCE_ORDER[best.verdict.confidence]
-            ):
+            if v.accepted and (best is None or CONFIDENCE_ORDER[v.confidence] > best.rank):
                 best = Resolution(
                     doi=clean_doi(item["DOI"]),
                     title=title,
@@ -192,9 +194,7 @@ class Scholarly:
             v = self._check(
                 paper, w.get("display_name") or w.get("title") or "", w.get("publication_year"), authors
             )
-            if not v.accepted or (
-                best and CONFIDENCE_ORDER[v.confidence] <= CONFIDENCE_ORDER[best.verdict.confidence]
-            ):
+            if not v.accepted or (best and CONFIDENCE_ORDER[v.confidence] <= best.rank):
                 continue
             res = Resolution(
                 doi=clean_doi(w["doi"]) if w.get("doi") else None,
@@ -226,9 +226,7 @@ class Scholarly:
                 p.get("year"),
                 [a.get("name", "") for a in p.get("authors") or []],
             )
-            if not v.accepted or (
-                best and CONFIDENCE_ORDER[v.confidence] <= CONFIDENCE_ORDER[best.verdict.confidence]
-            ):
+            if not v.accepted or (best and CONFIDENCE_ORDER[v.confidence] <= best.rank):
                 continue
             doi = (p.get("externalIds") or {}).get("DOI")
             pdf = (p.get("openAccessPdf") or {}).get("url")
@@ -256,9 +254,7 @@ class Scholarly:
             authors = [c.get("familyName") or c.get("name", "") for c in a.get("creators") or []]
             year = int(a["publicationYear"]) if str(a.get("publicationYear", "")).isdigit() else None
             v = self._check(paper, title, year, authors)
-            if v.accepted and (
-                best is None or CONFIDENCE_ORDER[v.confidence] > CONFIDENCE_ORDER[best.verdict.confidence]
-            ):
+            if v.accepted and (best is None or CONFIDENCE_ORDER[v.confidence] > best.rank):
                 best = Resolution(
                     doi=clean_doi(a.get("doi") or d.get("id", "")),
                     title=title,
@@ -285,9 +281,7 @@ class Scholarly:
         for w in (data or {}).get("results", []) or []:
             authors = [a.get("name", "") for a in w.get("authors") or []]
             v = self._check(paper, w.get("title") or "", w.get("yearPublished"), authors)
-            if v.accepted and (
-                best is None or CONFIDENCE_ORDER[v.confidence] > CONFIDENCE_ORDER[best.verdict.confidence]
-            ):
+            if v.accepted and (best is None or CONFIDENCE_ORDER[v.confidence] > best.rank):
                 best = Resolution(
                     doi=clean_doi(w["doi"]) if w.get("doi") else None,
                     title=w.get("title", ""),
@@ -299,7 +293,7 @@ class Scholarly:
         return best
 
     # --------------------------------------------------------------- PDF locations
-    def _openalex_locations(self, work: dict) -> tuple[list[Candidate], list[str]]:
+    def _openalex_locations(self, work: dict[str, Any]) -> tuple[list[Candidate], list[str]]:
         cands, landing = [], []
         for loc in [work.get("best_oa_location"), *(work.get("locations") or [])]:
             if not loc:
@@ -310,7 +304,7 @@ class Scholarly:
                 landing.append(loc["landing_page_url"])
         return cands, landing
 
-    def oa_candidates(self, doi: str, info: dict | None = None) -> Iterator[list[Candidate]]:
+    def oa_candidates(self, doi: str, info: dict[str, str] | None = None) -> Iterator[list[Candidate]]:
         """Yield the candidates in batches, with the best sources first.
 
         When a batch gives a good PDF, the caller stops. Then the code does not call the other APIs.
@@ -354,30 +348,30 @@ class Scholarly:
             lambda: self.c.get_json(S2 + f"DOI:{qdoi}", {"fields": "openAccessPdf"}, headers),
             lambda: self.c.get_json(f"{CROSSREF}/{qdoi}", self._mailto()),
         )
-        batch = []
+        found: list[Candidate | None] = []
         for r in ((e or {}).get("resultList") or {}).get("result", [])[:1]:
             pmcid = pmcid or r.get("pmcid") or ""
             for f in (r.get("fullTextUrlList") or {}).get("fullTextUrl") or []:
                 if f.get("documentStyle") == "pdf" and f.get("availabilityCode") in ("OA", "F"):
-                    batch.append(make_candidate(f.get("url"), "europepmc", stage=1))
+                    found.append(make_candidate(f.get("url"), "europepmc", stage=1))
         if pmcid.upper().startswith("PMC"):
-            batch.append(
+            found.append(
                 make_candidate(
                     f"https://europepmc.org/backend/ptpmcrender.fcgi?accid={pmcid}&blobtype=pdf",
                     "europepmc",
                     stage=1,
                 )
             )
-            batch.append(
+            found.append(
                 make_candidate(f"https://europepmc.org/articles/{pmcid}?pdf=render", "europepmc", stage=1)
             )
-        batch.append(
+        found.append(
             make_candidate(((s or {}).get("openAccessPdf") or {}).get("url"), "semanticscholar", stage=1)
         )
         item = (cr or {}).get("message") or {}
         for link in item.get("link") or []:
             if link.get("content-type") == "application/pdf":
-                batch.append(
+                found.append(
                     make_candidate(
                         link.get("URL"),
                         "crossref-link",
@@ -386,11 +380,12 @@ class Scholarly:
                     )
                 )
         for url in publisher_pdf_urls(doi, item):
-            batch.append(make_candidate(url, "publisher-pattern", stage=1))
-        yield sorted(c for c in batch if c)
+            found.append(make_candidate(url, "publisher-pattern", stage=1))
+        yield sorted(c for c in found if c)
 
         # Stage 2: landing pages. The doi.org page comes first, because it opens the page of the publisher.
-        seen, pages = set(), []
+        seen: set[str] = set()
+        pages: list[Candidate | None] = []
         for url in [f"https://doi.org/{doi}", *landing]:
             if url not in seen:
                 seen.add(url)

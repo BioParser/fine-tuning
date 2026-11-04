@@ -21,6 +21,7 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Any
 
 from .coverage import VALUE_COLUMNS
 from .schema import DOCUMENT_COLUMNS, MODEL_COLUMNS
@@ -46,8 +47,8 @@ def _prf(tp: int, n_pred: int, n_gold: int) -> dict[str, float]:
     return {"precision": precision, "recall": recall, "f1": f1}
 
 
-def _facts(records: Iterable[Mapping[str, str]], columns: Sequence[str]) -> Counter:
-    facts: Counter = Counter()
+def _facts(records: Iterable[Mapping[str, str]], columns: Sequence[str]) -> Counter[tuple[str, ...]]:
+    facts: Counter[tuple[str, ...]] = Counter()
     for r in records:
         key = tuple(_norm(r.get(c, "")) for c in KEY_COLUMNS)
         for col in columns:
@@ -56,11 +57,11 @@ def _facts(records: Iterable[Mapping[str, str]], columns: Sequence[str]) -> Coun
     return facts
 
 
-def score_document(pred: Sequence[Mapping[str, str]], gold: Sequence[Mapping[str, str]]) -> dict:
+def score_document(pred: Sequence[Mapping[str, str]], gold: Sequence[Mapping[str, str]]) -> dict[str, Any]:
     """Counts (tp, n_pred, n_gold) per metric for one article."""
     rows_p = Counter(tuple(_norm(r.get(c, "")) for c in SCORED_COLUMNS) for r in pred)
     rows_g = Counter(tuple(_norm(r.get(c, "")) for c in SCORED_COLUMNS) for r in gold)
-    out: dict = {}
+    out: dict[str, Any] = {}
     for name, p, g in (
         ("row", rows_p, rows_g),
         ("cell", _facts(pred, SCORED_COLUMNS), _facts(gold, SCORED_COLUMNS)),
@@ -74,8 +75,8 @@ def score_document(pred: Sequence[Mapping[str, str]], gold: Sequence[Mapping[str
     return out
 
 
-def aggregate(doc_scores: Sequence[dict]) -> dict:
-    result: dict = {"documents": len(doc_scores)}
+def aggregate(doc_scores: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {"documents": len(doc_scores)}
     for name in METRICS:
         tp = sum(d[name][0] for d in doc_scores)
         n_pred = sum(d[name][1] for d in doc_scores)
@@ -88,12 +89,12 @@ def aggregate(doc_scores: Sequence[dict]) -> dict:
     return result
 
 
-def _read_jsonl(path: Path) -> list[dict]:
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     with path.open(encoding="utf-8") as fh:
         return [json.loads(line) for line in fh if line.strip()]
 
 
-def evaluate_files(dataset: Path, predictions: Path) -> dict:
+def evaluate_files(dataset: Path, predictions: Path) -> dict[str, Any]:
     gold = {ex["id"]: ex for ex in _read_jsonl(dataset)}
     docs, per_doc = [], {}
     for pred in _read_jsonl(predictions):

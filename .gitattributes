@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.pdf binary
+*.zip binary
+
+# Generated: GitHub collapses this file in pull request diffs.
+uv.lock linguist-generated=true

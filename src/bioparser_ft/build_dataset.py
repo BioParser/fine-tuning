@@ -26,6 +26,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 from .coverage import label_coverage
 from .linking import link
@@ -82,14 +83,14 @@ def build(
     min_coverage: float = 0.5,
     min_name_coverage: float = 0.5,
     salt: str = "bioparser-split-v1",
-) -> dict:
+) -> dict[str, Any]:
     if manifest is None:
         # The fetch command writes fine_tuning_data/manifest.tsv. Use it when it is there.
         default = tsv_dir.parent / "manifest.tsv"
         manifest = default if default.is_file() else None
     linked = link(tsv_dir, markdown_dir, manifest)
     infos: list[ExampleInfo] = []
-    rows_by_split: dict[str, list[dict]] = {s: [] for s in SPLITS}
+    rows_by_split: dict[str, list[dict[str, Any]]] = {s: [] for s in SPLITS}
     citation_owner: dict[str, str] = {}
     cross_pair_citations: list[str] = []
 
@@ -111,7 +112,7 @@ def build(
         reason = None
         if not records:
             reason = "no label rows"
-        elif cov.values_total >= MIN_VALUES_TO_JUDGE:
+        elif cov.value_ratio is not None and cov.values_total >= MIN_VALUES_TO_JUDGE:
             if cov.value_ratio < min_coverage:
                 reason = f"value coverage {cov.value_ratio:.0%} < {min_coverage:.0%}"
         # Names are a weaker signal (curators may update taxonomy), so they decide only
@@ -184,7 +185,7 @@ def build(
     return report
 
 
-def _print_summary(report: dict, out_dir: Path) -> None:
+def _print_summary(report: dict[str, Any], out_dir: Path) -> None:
     c = report["counts"]
     if report.get("manifest"):
         print(f"manifest: {report['manifest']}")

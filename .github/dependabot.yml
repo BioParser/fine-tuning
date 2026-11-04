@@ -1,0 +1,60 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/"
+      - "/.github/actions/setup"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "CI"
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "pre-commit"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "CI"
+    cooldown:
+      default-days: 7
+    ignore:
+      # This rev is the uv release CI pins by hand. Bump both manually.
+      - dependency-name: "https://github.com/astral-sh/uv-pre-commit"
+    groups:
+      pre-commit-hooks:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "build"
+      include: "scope"
+    cooldown:
+      default-days: 7
+    ignore:
+      # The GPU training stack is pinned to the combination that ran on the RTX 2060. CI has no
+      # GPU, so it cannot test an update. Update these packages by hand, and test on a GPU.
+      - dependency-name: "accelerate"
+      - dependency-name: "bitsandbytes"
+      - dependency-name: "datasets"
+      - dependency-name: "peft"
+      - dependency-name: "torch"
+      - dependency-name: "torchao"
+      - dependency-name: "transformers"
+      - dependency-name: "trl"
+      - dependency-name: "unsloth"
+      - dependency-name: "unsloth-zoo"
+    groups:
+      uv-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"

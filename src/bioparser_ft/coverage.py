@@ -56,7 +56,7 @@ def numbers_in(text: str, *, min_value: int = 10) -> set[str]:
 
 def _name_key(name: str) -> str:
     """Most specific lower-case epithet of a name (genus if there is none)."""
-    words = [w for w in re.findall(r"[A-Za-z]+", name)]
+    words: list[str] = re.findall(r"[A-Za-z]+", name)
     epithets = [w.casefold() for w in words[1:] if w.islower() and w.casefold() not in _NAME_STOPWORDS]
     if epithets:
         return epithets[-1]

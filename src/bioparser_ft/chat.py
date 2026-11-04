@@ -68,7 +68,7 @@ def render_training_text(processing_class: Any, messages: Sequence[Message]) -> 
     """Prompt + target TSV + EOS. Ends exactly with EOS, so TRL does not append a second one."""
     if messages[-1]["role"] != "assistant":
         raise ValueError("training messages must end with the assistant turn")
-    eos = text_tokenizer(processing_class).eos_token
+    eos: str = text_tokenizer(processing_class).eos_token
     return render_prompt(processing_class, messages) + messages[-1]["content"] + eos
 
 

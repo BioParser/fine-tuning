@@ -52,7 +52,7 @@ def check_pdf(data: bytes, title: str, doi: str | None, *, min_bytes: int = MIN_
         text = " ".join((reader.pages[i].extract_text() or "") for i in range(min(3, pages)))
     except Exception as exc:  # A damaged or unusual PDF file: keep it, but not as verified
         return PdfCheck(True, False, reason=f"pypdf cannot read the file: {type(exc).__name__}")
-    doi_found = bool(doi) and doi.lower() in text.lower().replace(" ", "")
+    doi_found = bool(doi and doi.lower() in text.lower().replace(" ", ""))
     if len(text.strip()) < 200:
         return PdfCheck(True, doi_found, pages, None, doi_found, "no text layer: a scanned document?")
     recall = title_recall_in_text(title, text) if title else None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -36,7 +37,7 @@ GOLD = [
 ]
 
 
-def test_scores():
+def test_scores() -> None:
     perfect = aggregate([score_document(list(reversed(GOLD)), GOLD)])  # order does not matter
     assert perfect["row"]["f1"] == perfect["cell"]["f1"] == perfect["value"]["f1"] == 1.0
     assert perfect["references_exact"] == 1.0
@@ -48,7 +49,7 @@ def test_scores():
     assert numeric["value"]["f1"] == 1.0  # "81.70" == "81.7"
 
 
-def test_evaluate_files(tmp_path: Path):
+def test_evaluate_files(tmp_path: Path) -> None:
     tsv = "\n".join(["\t".join(MODEL_COLUMNS)] + ["\t".join(r[c] for c in MODEL_COLUMNS) for r in GOLD])
     ds = tmp_path / "test.jsonl"
     ds.write_text(json.dumps({"id": "p1", "messages": build_messages("x", tsv)}) + "\n", encoding="utf-8")
@@ -69,8 +70,12 @@ class StubTokenizer:
         self.honours_flag = honours_flag
 
     def apply_chat_template(
-        self, messages, tokenize=False, add_generation_prompt=False, enable_thinking=True
-    ):
+        self,
+        messages: Sequence[Mapping[str, str]],
+        tokenize: bool = False,
+        add_generation_prompt: bool = False,
+        enable_thinking: bool = True,
+    ) -> str:
         text = "".join(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n" for m in messages)
         if add_generation_prompt:
             text += "<|im_start|>assistant\n"
@@ -80,7 +85,7 @@ class StubTokenizer:
                 text += NO_THINK_PREFIX
         return text
 
-    def __call__(self, texts, add_special_tokens=False):
+    def __call__(self, texts: Sequence[str], add_special_tokens: bool = False) -> dict[str, list[list[str]]]:
         return {"input_ids": [t.split() for t in texts]}
 
 
@@ -91,7 +96,7 @@ class StubProcessor:  # what FastLanguageModel returns for Qwen3.5
 
 
 @pytest.mark.parametrize("honours_flag", [True, False])
-def test_render_prompt_is_non_thinking(honours_flag: bool):
+def test_render_prompt_is_non_thinking(honours_flag: bool) -> None:
     proc = StubProcessor(StubTokenizer(honours_flag))
     msgs = build_messages("# Paper\nMus spretus 66.2 mm", "ANSWER_SENTINEL")
     prompt = render_prompt(proc, msgs)
@@ -102,7 +107,7 @@ def test_render_prompt_is_non_thinking(honours_flag: bool):
     assert text == prompt + "ANSWER_SENTINEL<|im_end|>"  # ends exactly with EOS
 
 
-def test_prepare_training_texts_drops_not_truncates():
+def test_prepare_training_texts_drops_not_truncates() -> None:
     proc = StubProcessor(StubTokenizer())
     rows = [
         {"id": "short", "messages": build_messages("a", "T")},
@@ -112,7 +117,7 @@ def test_prepare_training_texts_drops_not_truncates():
     assert [r["id"] for r in kept] == ["short"] and dropped[0][0] == "long"
 
 
-def test_render_with_real_transformers_template():
+def test_render_with_real_transformers_template() -> None:
     """Runs where transformers is installed (the training env): real apply_chat_template."""
     pytest.importorskip("tokenizers")
     transformers = pytest.importorskip("transformers")

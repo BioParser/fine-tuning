@@ -72,7 +72,7 @@ class TrainConfig:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
-def read_split(dataset_dir: Path, split: str) -> list[dict]:
+def read_split(dataset_dir: Path, split: str) -> list[dict[str, Any]]:
     path = dataset_dir / f"{split}.jsonl"
     if not path.exists():
         return []
@@ -88,9 +88,9 @@ def _sha256(path: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
 
 
-def lora_report(model: Any) -> Counter:
+def lora_report(model: Any) -> Counter[str]:
     """Number of LoRA-wrapped modules per leaf name (verifies the targets really attached)."""
-    counts: Counter = Counter()
+    counts: Counter[str] = Counter()
     for name, module in model.named_modules():
         lora_a = getattr(module, "lora_A", None)
         if lora_a is not None and hasattr(lora_a, "keys") and len(lora_a):
@@ -127,7 +127,13 @@ def load_model(cfg: TrainConfig) -> tuple[Any, Any]:
     return model, processor
 
 
-def build_trainer(cfg: TrainConfig, model: Any, processor: Any, train_rows: list, val_rows: list) -> Any:
+def build_trainer(
+    cfg: TrainConfig,
+    model: Any,
+    processor: Any,
+    train_rows: list[dict[str, Any]],
+    val_rows: list[dict[str, Any]],
+) -> Any:
     from unsloth.chat_templates import train_on_responses_only  # noqa: I001 - unsloth must patch trl first
     from datasets import Dataset
     from trl import SFTConfig, SFTTrainer
@@ -222,10 +228,10 @@ def save_artifacts(
     cfg: TrainConfig,
     model: Any,
     processor: Any,
-    train_rows: list,
-    val_rows: list,
-    dropped: list,
-    metrics: dict,
+    train_rows: list[dict[str, Any]],
+    val_rows: list[dict[str, Any]],
+    dropped: list[tuple[str, int]],
+    metrics: dict[str, Any],
 ) -> Path:
     """Save adapter + processor + provenance (prompt version, dataset hashes, ids)."""
     adapter_dir = cfg.output_dir / "lora_adapter"
