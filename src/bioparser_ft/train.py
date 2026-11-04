@@ -67,10 +67,10 @@ class TrainConfig:
     #
     # r = 16, alpha = 32 =>   32/16=2 stronger update
     #
-    # r = 64, alpha = 64 =>   64/64=1 but larger adapter 
+    # r = 64, alpha = 64 =>   64/64=1 but larger adapter
     #
     lora_r: int = 16 # lower rank -> less trainable parameters -> worse fine-tu
-    lora_alpha: int = 16 # how strongly the LoRA update affects the weights 
+    lora_alpha: int = 16 # how strongly the LoRA update affects the weights
     lora_dropout: float = 0.0  # 0 enables Unsloth's fast LoRA kernels
     target_modules: tuple[str, ...] = LORA_TARGET_MODULES
 
