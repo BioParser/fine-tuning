@@ -33,19 +33,22 @@ dev = ["pytest>=8.3", "ruff>=0.12"]
 # "lab" (previously listed) is an unrelated benchmark-experiment framework on PyPI,
 # not JupyterLab.
 notebook = ["jupyterlab>=4.4", "ipykernel>=6.29", "ipywidgets>=8.1"]
+# Packages for bioparser-fetch-pdfs. For the browser modes, also run: uv run playwright install chromium
+fetch = ["httpx>=0.28", "beautifulsoup4>=4.12", "pypdf>=5.0", "playwright>=1.50"]
 
 [project.scripts]
 bioparser-build-dataset = "bioparser_ft.build_dataset:main"
 bioparser-train = "bioparser_ft.train:main"
 bioparser-predict = "bioparser_ft.infer:main"
 bioparser-evaluate = "bioparser_ft.evaluate:main"
+bioparser-fetch-pdfs = "bioparser_ft.fetch.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.12.19,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.uv]
-default-groups = ["dev", "notebook"]
+default-groups = ["dev", "notebook", "fetch"]
 
 [tool.uv.build-backend]
 module-name = "bioparser_ft"

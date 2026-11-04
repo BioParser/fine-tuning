@@ -86,3 +86,19 @@ def test_split_is_stable_and_grouped():
     assert all(assign_split("doe, j., 2020. title.", 0.2, 0.2, "salt") == a for _ in range(5))
     splits = [assign_split(f"paper {i}", 0.1, 0.1, "salt") for i in range(2000)]
     assert 0.07 < splits.count("test") / 2000 < 0.13
+
+
+def test_build_uses_default_manifest(ets_dir: Path, parsed_dir: Path, tmp_path: Path):
+    """The fetch command writes manifest.tsv next to ets_tsv/. The builder uses it without --manifest."""
+    (ets_dir.parent / "manifest.tsv").write_text(
+        "tsv\tmarkdown\nETS_Doe and Roe, 2020 part 2.tsv\tDoe and Roe, 2020.zip\n", encoding="utf-8"
+    )
+    report = build(ets_dir, parsed_dir, tmp_path / "processed", val_fraction=0.0, test_fraction=0.0)
+    assert report["manifest"].endswith("manifest.tsv")
+    assert report["unmatched_tsv"] == ["ETS_Nobody, 1999.tsv"]  # the "part 2" file has its pair
+
+
+def test_build_without_manifest_file(ets_dir: Path, parsed_dir: Path, tmp_path: Path):
+    report = build(ets_dir, parsed_dir, tmp_path / "processed", val_fraction=0.0, test_fraction=0.0)
+    assert report["manifest"] is None
+    assert "ETS_Doe and Roe, 2020 part 2.tsv" in report["unmatched_tsv"]

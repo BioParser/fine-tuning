@@ -25,7 +25,7 @@ PDF --MinerU--> markdown --clean_markdown--> chat prompt --Qwen3.5+LoRA--> TSV -
 The command `uv sync` installs the packages from `uv.lock`. It also installs the package
 `bioparser_ft` of this repository in editable mode.
 
-The file `uv.lock` contains the package versions that are tested to operate correctly on the RTX 2060 GPU
+The file `uv.lock` contains the package versions that we tested on the RTX 2060 GPU
 with 6 GB of VRAM:
 
 - Unsloth 2026.11.1
@@ -46,18 +46,98 @@ To add or change a package, do the steps that follow:
 the Gated-DeltaNet Triton kernels. Kernel packages from other sources are not in `uv.lock`, and
 `uv sync` removes them. The command `uv sync --inexact` keeps them.
 
+## Get the PDF files
+
+The command `bioparser-fetch-pdfs` downloads the article PDF for each client TSV file. Most
+client citations do not contain a DOI. For this reason, the command first finds the DOI from the
+citation text. Then it finds a PDF file for the DOI.
+
+The command uses these sources, in this sequence:
+
+1. Open-access indexes: Unpaywall, OpenAlex, Europe PMC, Semantic Scholar, DataCite and CORE
+2. The PDF links on the landing page of the publisher
+3. With the option `--browser`: a headless browser that clicks the PDF link
+4. With the option `--manual`: a visible browser. You click the link or log in, and the command
+   saves the PDF file. Only this option uses the library proxy of `--proxy-prefix`.
+
+The command makes sure that each PDF file contains the title or the DOI of the article. It waits
+1 second between two requests to the same host. It keeps the API answers in
+`fine_tuning_data/.fetch_cache/`, so a second run is fast.
+
+**CAUTION:** Do these steps outside the network of the university. On the university network,
+the automatic steps also download articles that are not open access. The terms of the library do
+not let programs do this. For more information, refer to
+[Library access with EZproxy](fine_tuning_data/README.md#library-access-with-ezproxy).
+
+To get the PDF files, do the steps that follow:
+
+1. Find the DOIs only, and examine the matches in `fine_tuning_data/pdf_sources.tsv`:
+
+   ```bash
+   uv run bioparser-fetch-pdfs --email you@helsinki.fi --resolve-only
+   ```
+
+2. Download the PDF files:
+
+   ```bash
+   uv run bioparser-fetch-pdfs --email you@helsinki.fi
+   ```
+
+3. Install the browser for the options `--browser` and `--manual`. Do this step one time only:
+
+   ```bash
+   uv run playwright install chromium
+   ```
+
+4. Download the PDF files from pages that use JavaScript:
+
+   ```bash
+   uv run bioparser-fetch-pdfs --email you@helsinki.fi --browser
+   ```
+
+5. Get the other PDF files manually. To use the access of the University of Helsinki, add the
+   EZproxy prefix of the library:
+
+   ```bash
+   uv run bioparser-fetch-pdfs --email you@helsinki.fi --manual \
+       --proxy-prefix "https://login.libproxy.helsinki.fi/login?url="
+   ```
+
+The command writes these results:
+
+- `fine_tuning_data/pdfs/`: the PDF files that contain the title or the DOI of the article
+- `fine_tuning_data/pdfs/_unverified/`: PDF files without the title or the DOI. Examine them
+  manually.
+- `fine_tuning_data/pdf_sources.tsv`: one row for each article, with the status, the DOI, the
+  source and the SHA-256 hash
+- `fine_tuning_data/manifest.tsv`: new rows for articles with more than one TSV file
+
+If a DOI is incorrect or not found, add a row to `fine_tuning_data/doi_overrides.tsv`. This file is
+tab-separated and has the columns `tsv`, `doi`, `url` and `note`. Then run the command again.
+
+**CAUTION:** Keep the folder `fine_tuning_data/.browser_profile/` private. It contains the cookies
+of your library login. When you have all the PDF files, delete the folder.
+
+**NOTE:** The command does not use shadow libraries. It does not go around paywalls or CAPTCHAs.
+For articles that are not open access, other sources are your library, an interlibrary loan, the
+authors and the client. The client has the PDF files that they used for the labels.
+
 ## From client data to a trained model
+
+For a short list of all commands, refer to the Quickstart in
+[fine_tuning_data/README.md](fine_tuning_data/README.md#quickstart).
 
 1. Put the client data in the folder `fine_tuning_data/`, as
    [fine_tuning_data/README.md](fine_tuning_data/README.md) shows.
-2. Parse the PDF files with the MinerU version of production:
+2. Get the PDF files with `bioparser-fetch-pdfs`, as the section above shows.
+3. Parse the PDF files with the MinerU version of production:
 
    ```bash
    scripts/parse_pdfs.sh
    ```
 
    The script writes one zip file for each PDF file to `fine_tuning_data/parsed/`.
-3. Make the dataset:
+4. Make the dataset:
 
    ```bash
    uv run bioparser-build-dataset
@@ -65,7 +145,7 @@ the Gated-DeltaNet Triton kernels. Kernel packages from other sources are not in
 
    The command writes `train.jsonl`, `val.jsonl` and `test.jsonl` to `data/processed/`. It also
    examines each pair of files and writes the results to `build_report.json`.
-4. Train the model with this command:
+5. Train the model with this command:
 
    ```bash
    uv run bioparser-train
@@ -74,13 +154,13 @@ the Gated-DeltaNet Triton kernels. Kernel packages from other sources are not in
    You can also use the notebook. Start JupyterLab with `uv run jupyter lab`. Then open
    `notebooks/Qwen3_5_0_8B.ipynb`. The command and the notebook use the same functions in
    `src/bioparser_ft/`. The tools save the adapter in `outputs/qwen3.5-0.8b-ets/lora_adapter/`.
-5. Use the adapter on the test articles:
+6. Use the adapter on the test articles:
 
    ```bash
    uv run bioparser-predict --model outputs/qwen3.5-0.8b-ets/lora_adapter --dataset data/processed/test.jsonl --out outputs/preds_test.jsonl
    ```
 
-6. Calculate the scores:
+7. Calculate the scores:
 
    ```bash
    uv run bioparser-evaluate --dataset data/processed/test.jsonl --predictions outputs/preds_test.jsonl
@@ -169,7 +249,7 @@ two methods that follow:
 
 ## GPU notes: RTX 2060 Max-Q with 6 GB
 > [!NOTE] 
-> RTX 2060 Max-Q with 6 GB is a very low-end turing GPU tested for minimal requirements.
+> The RTX 2060 Max-Q with 6 GB is a low-end Turing GPU. We use it to test the minimum requirements.
 - **Data type.** Turing GPUs do not have bf16. On these GPUs, Unsloth trains Qwen3.5 in float32,
   because the Gated-DeltaNet layers give NaN gradients in float16. Unsloth does not recommend
   4-bit QLoRA for Qwen3.5.

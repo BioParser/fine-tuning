@@ -83,6 +83,10 @@ def build(
     min_name_coverage: float = 0.5,
     salt: str = "bioparser-split-v1",
 ) -> dict:
+    if manifest is None:
+        # The fetch command writes fine_tuning_data/manifest.tsv. Use it when it is there.
+        default = tsv_dir.parent / "manifest.tsv"
+        manifest = default if default.is_file() else None
     linked = link(tsv_dir, markdown_dir, manifest)
     infos: list[ExampleInfo] = []
     rows_by_split: dict[str, list[dict]] = {s: [] for s in SPLITS}
@@ -164,6 +168,7 @@ def build(
     excluded = [i for i in infos if i.excluded_reason]
     report = {
         "prompt_version": PROMPT_VERSION,
+        "manifest": str(manifest) if manifest else None,
         "counts": {s: len(r) for s, r in rows_by_split.items()}
         | {"excluded": len(excluded), "unmatched_tsv": len(linked.unmatched_tsv)},
         "excluded": {i.id: i.excluded_reason for i in excluded},
@@ -181,6 +186,8 @@ def build(
 
 def _print_summary(report: dict, out_dir: Path) -> None:
     c = report["counts"]
+    if report.get("manifest"):
+        print(f"manifest: {report['manifest']}")
     print(
         f"train={c['train']} val={c['val']} test={c['test']} excluded={c['excluded']} "
         f"unmatched_tsv={c['unmatched_tsv']}  ->  {out_dir}"
@@ -205,7 +212,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--tsv-dir", type=Path, default=Path("fine_tuning_data/ets_tsv"))
     ap.add_argument("--markdown-dir", type=Path, default=Path("fine_tuning_data/parsed"))
-    ap.add_argument("--manifest", type=Path, help="CSV with columns tsv,markdown for non-matching names")
+    ap.add_argument(
+        "--manifest",
+        type=Path,
+        help="tab-separated file with the columns tsv and markdown, for files with different names. "
+        "Default: manifest.tsv next to the --tsv-dir folder, if the file is there.",
+    )
     ap.add_argument("--out-dir", type=Path, default=Path("data/processed"))
     ap.add_argument("--val-fraction", type=float, default=0.1)
     ap.add_argument("--test-fraction", type=float, default=0.1)
