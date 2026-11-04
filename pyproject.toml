@@ -22,6 +22,8 @@ dependencies = [
     "unsloth==2026.11.1",
     "unsloth-zoo==2026.11.1",
     "torch==2.10.0",
+	"torchvision==0.25.0",
+	"xformers",
     "transformers==5.17.0",
     "trl==0.22.2",
     "datasets>=4.3,<5",
@@ -59,13 +61,14 @@ default-groups = ["dev", "notebook", "fetch"]
 module-name = "bioparser_ft"
 
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-xformers = { index = "pytorch-cu128" }
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+xformers = { index = "pytorch-cu130" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
