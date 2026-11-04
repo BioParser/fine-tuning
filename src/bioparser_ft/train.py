@@ -28,12 +28,12 @@ from typing import Any
 
 from . import __version__
 from .chat import (
-        INSTRUCTION_PART,
-        RESPONSE_PART,
-        check_label_masking,
-        check_prompt,
-        prepare_training_texts,
-        )
+    INSTRUCTION_PART,
+    RESPONSE_PART,
+    check_label_masking,
+    check_prompt,
+    prepare_training_texts,
+)
 from .schema import MODEL_COLUMNS, PROMPT_VERSION
 
 # Qwen3.5 = 3 Gated-DeltaNet (linear attention) layers per full-attention layer. The
@@ -56,9 +56,9 @@ class TrainConfig:
 
     # Model
     model_name: str = "Qwen/Qwen3.5-0.8B"
-    model_revision: str | None = None # pin of model
-    max_seq_length: int = 65536 # still need a bit longer to fit all PDFs
-                                # still few long PDFs are dropped if exceeds msl
+    model_revision: str | None = None  # pin of model
+    max_seq_length: int = 65536  # still need a bit longer to fit all PDFs
+    # still few long PDFs are dropped if exceeds msl
 
     # LoRA:   W' = W + (alpha/r) BA
     #
@@ -69,8 +69,8 @@ class TrainConfig:
     #
     # r = 64, alpha = 64 =>   64/64=1 but larger adapter
     #
-    lora_r: int = 16 # lower rank -> less trainable parameters -> worse fine-tu
-    lora_alpha: int = 16 # how strongly the LoRA update affects the weights
+    lora_r: int = 16  # lower rank -> less trainable parameters -> worse fine-tu
+    lora_alpha: int = 16  # how strongly the LoRA update affects the weights
     lora_dropout: float = 0.0  # 0 enables Unsloth's fast LoRA kernels
     target_modules: tuple[str, ...] = LORA_TARGET_MODULES
 
@@ -82,7 +82,7 @@ class TrainConfig:
     warmup_fraction: float = 0.05
     weight_decay: float = 0.01
     seed: int = 3407
-    tiled_mlp: bool = True # False if enough compute
+    tiled_mlp: bool = True  # False if enough compute
     eval: bool = True
     merge_16bit: bool = False
     push_to_hub: str | None = None  # private repo id; token from $HF_TOKEN or `hf auth login`
@@ -130,39 +130,39 @@ def load_model(cfg: TrainConfig) -> tuple[Any, Any]:
     from unsloth import FastLanguageModel  # must precede transformers/trl imports
 
     model, processor = FastLanguageModel.from_pretrained(
-            model_name=cfg.model_name,
-            revision=cfg.model_revision,
-            max_seq_length=cfg.max_seq_length,  # also sizes Unsloth's embedding-offload decision
-            dtype=None,  # auto: bf16 if supported, else float32 for Qwen3.5
-            load_in_4bit=False,  # 16-bit LoRA
-            use_gradient_checkpointing="unsloth",  # activation offload to CPU RAM
-            unsloth_tiled_mlp=cfg.tiled_mlp,
-            random_state=cfg.seed,
-            )
+        model_name=cfg.model_name,
+        revision=cfg.model_revision,
+        max_seq_length=cfg.max_seq_length,  # also sizes Unsloth's embedding-offload decision
+        dtype=None,  # auto: bf16 if supported, else float32 for Qwen3.5
+        load_in_4bit=False,  # 16-bit LoRA
+        use_gradient_checkpointing="unsloth",  # activation offload to CPU RAM
+        unsloth_tiled_mlp=cfg.tiled_mlp,
+        random_state=cfg.seed,
+    )
     model = FastLanguageModel.get_peft_model(
-            model,
-            r=cfg.lora_r,
-            lora_alpha=cfg.lora_alpha,
-            lora_dropout=cfg.lora_dropout,
-            bias="none",
-            target_modules=list(cfg.target_modules),
-            finetune_vision_layers=False,  # text-only task: leave the vision tower frozen
-            finetune_language_layers=True,
-            finetune_attention_modules=True,
-            finetune_mlp_modules=True,
-            use_gradient_checkpointing="unsloth",
-            random_state=cfg.seed,
-            )
+        model,
+        r=cfg.lora_r,
+        lora_alpha=cfg.lora_alpha,
+        lora_dropout=cfg.lora_dropout,
+        bias="none",
+        target_modules=list(cfg.target_modules),
+        finetune_vision_layers=False,  # text-only task: leave the vision tower frozen
+        finetune_language_layers=True,
+        finetune_attention_modules=True,
+        finetune_mlp_modules=True,
+        use_gradient_checkpointing="unsloth",
+        random_state=cfg.seed,
+    )
     return model, processor
 
 
 def build_trainer(
-        cfg: TrainConfig,
-        model: Any,
-        processor: Any,
-        train_rows: list[dict[str, Any]],
-        val_rows: list[dict[str, Any]],
-        ) -> Any:
+    cfg: TrainConfig,
+    model: Any,
+    processor: Any,
+    train_rows: list[dict[str, Any]],
+    val_rows: list[dict[str, Any]],
+) -> Any:
     from unsloth.chat_templates import train_on_responses_only  # noqa: I001 - unsloth must patch trl first
     from datasets import Dataset
     from trl import SFTConfig, SFTTrainer
@@ -171,38 +171,38 @@ def build_trainer(
     total_steps = max(1, math.ceil(steps_per_epoch * cfg.epochs))
     has_eval = cfg.eval and bool(val_rows)
     args = SFTConfig(
-            output_dir=str(cfg.output_dir / "checkpoints"),
-            dataset_text_field="text",
-            max_length=cfg.max_seq_length,  # TRL default is 1024 and truncates silently
-            packing=False,
-            dataset_num_proc=1,
-            per_device_train_batch_size=cfg.batch_size,
-            per_device_eval_batch_size=1,
-            gradient_accumulation_steps=cfg.grad_accum,
-            num_train_epochs=cfg.epochs,
-            learning_rate=cfg.learning_rate,
-            warmup_steps=max(1, round(cfg.warmup_fraction * total_steps)),
-            lr_scheduler_type="linear",
-            weight_decay=cfg.weight_decay,
-            optim="adamw_8bit",
-            logging_steps=1,
-            eval_strategy="epoch" if has_eval else "no",
-            save_strategy="epoch",
-            save_total_limit=2,
-            load_best_model_at_end=has_eval,
-            metric_for_best_model="eval_loss" if has_eval else None,
-            greater_is_better=False if has_eval else None,
-            seed=cfg.seed,
-            report_to="none",
-            **cfg.extra,
-            )
+        output_dir=str(cfg.output_dir / "checkpoints"),
+        dataset_text_field="text",
+        max_length=cfg.max_seq_length,  # TRL default is 1024 and truncates silently
+        packing=False,
+        dataset_num_proc=1,
+        per_device_train_batch_size=cfg.batch_size,
+        per_device_eval_batch_size=1,
+        gradient_accumulation_steps=cfg.grad_accum,
+        num_train_epochs=cfg.epochs,
+        learning_rate=cfg.learning_rate,
+        warmup_steps=max(1, round(cfg.warmup_fraction * total_steps)),
+        lr_scheduler_type="linear",
+        weight_decay=cfg.weight_decay,
+        optim="adamw_8bit",
+        logging_steps=1,
+        eval_strategy="epoch" if has_eval else "no",
+        save_strategy="epoch",
+        save_total_limit=2,
+        load_best_model_at_end=has_eval,
+        metric_for_best_model="eval_loss" if has_eval else None,
+        greater_is_better=False if has_eval else None,
+        seed=cfg.seed,
+        report_to="none",
+        **cfg.extra,
+    )
     trainer = SFTTrainer(
-            model=model,
-            tokenizer=processor,  # Unsloth accepts the processor here (as in its notebooks)
-            train_dataset=Dataset.from_list([{"text": r["text"]} for r in train_rows]),
-            eval_dataset=Dataset.from_list([{"text": r["text"]} for r in val_rows]) if has_eval else None,
-            args=args,
-            )
+        model=model,
+        tokenizer=processor,  # Unsloth accepts the processor here (as in its notebooks)
+        train_dataset=Dataset.from_list([{"text": r["text"]} for r in train_rows]),
+        eval_dataset=Dataset.from_list([{"text": r["text"]} for r in val_rows]) if has_eval else None,
+        args=args,
+    )
     # Loss only on the assistant TSV. Without this the loss is dominated by
     # reproducing the paper text (thousands of prompt tokens per example).
     return train_on_responses_only(trainer, instruction_part=INSTRUCTION_PART, response_part=RESPONSE_PART)
@@ -256,32 +256,32 @@ def run(cfg: TrainConfig) -> Path:
 
 
 def save_artifacts(
-        cfg: TrainConfig,
-        model: Any,
-        processor: Any,
-        train_rows: list[dict[str, Any]],
-        val_rows: list[dict[str, Any]],
-        dropped: list[tuple[str, int]],
-        metrics: dict[str, Any],
-        ) -> Path:
+    cfg: TrainConfig,
+    model: Any,
+    processor: Any,
+    train_rows: list[dict[str, Any]],
+    val_rows: list[dict[str, Any]],
+    dropped: list[tuple[str, int]],
+    metrics: dict[str, Any],
+) -> Path:
     """Save adapter + processor + provenance (prompt version, dataset hashes, ids)."""
     adapter_dir = cfg.output_dir / "lora_adapter"
     model.save_pretrained(str(adapter_dir))
     processor.save_pretrained(str(adapter_dir))
     meta = {
-            "bioparser_ft": __version__,
-            "prompt_version": PROMPT_VERSION,
-            "model_columns": list(MODEL_COLUMNS),
-            # The commit that the Hub gave. transformers sets config._commit_hash, also without a revision.
-            "base_model_commit": getattr(getattr(model, "config", None), "_commit_hash", None),
-            "packages": _package_versions(),
-            "config": {k: (str(v) if isinstance(v, Path) else v) for k, v in asdict(cfg).items()},
-            "train_ids": [r["id"] for r in train_rows],
-            "val_ids": [r["id"] for r in val_rows],
-            "dropped_too_long": dropped,
-            "dataset_sha256": {s: _sha256(cfg.dataset_dir / f"{s}.jsonl") for s in ("train", "val", "test")},
-            "train_metrics": metrics,
-            }
+        "bioparser_ft": __version__,
+        "prompt_version": PROMPT_VERSION,
+        "model_columns": list(MODEL_COLUMNS),
+        # The commit that the Hub gave. transformers sets config._commit_hash, also without a revision.
+        "base_model_commit": getattr(getattr(model, "config", None), "_commit_hash", None),
+        "packages": _package_versions(),
+        "config": {k: (str(v) if isinstance(v, Path) else v) for k, v in asdict(cfg).items()},
+        "train_ids": [r["id"] for r in train_rows],
+        "val_ids": [r["id"] for r in val_rows],
+        "dropped_too_long": dropped,
+        "dataset_sha256": {s: _sha256(cfg.dataset_dir / f"{s}.jsonl") for s in ("train", "val", "test")},
+        "train_metrics": metrics,
+    }
     (adapter_dir / "bioparser_ft.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     print(f"adapter saved to {adapter_dir}")
 
@@ -304,10 +304,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     ap.add_argument("--output-dir", type=Path, default=d.output_dir)
     ap.add_argument("--model-name", default=d.model_name)
     ap.add_argument(
-            "--model-revision",
-            default=d.model_revision,
-            help="commit hash of the base model on the Hub. With it, each run trains on the same weights.",
-            )
+        "--model-revision",
+        default=d.model_revision,
+        help="commit hash of the base model on the Hub. With it, each run trains on the same weights.",
+    )
     ap.add_argument("--max-seq-length", type=int, default=d.max_seq_length)
     ap.add_argument("--lora-r", type=int, default=d.lora_r)
     ap.add_argument("--lora-alpha", type=int, default=d.lora_alpha)
@@ -321,24 +321,24 @@ def main(argv: Sequence[str] | None = None) -> None:
     ap.add_argument("--push-to-hub", metavar="REPO_ID", help="upload adapter to a PRIVATE hub repo")
     a = ap.parse_args(argv)
     run(
-            TrainConfig(
-                dataset_dir=a.dataset_dir,
-                output_dir=a.output_dir,
-                model_name=a.model_name,
-                model_revision=a.model_revision,
-                max_seq_length=a.max_seq_length,
-                lora_r=a.lora_r,
-                lora_alpha=a.lora_alpha,
-                epochs=a.epochs,
-                learning_rate=a.learning_rate,
-                grad_accum=a.grad_accum,
-                seed=a.seed,
-                tiled_mlp=a.tiled_mlp,
-                eval=not a.no_eval,
-                merge_16bit=a.merge_16bit,
-                push_to_hub=a.push_to_hub,
-                )
-            )
+        TrainConfig(
+            dataset_dir=a.dataset_dir,
+            output_dir=a.output_dir,
+            model_name=a.model_name,
+            model_revision=a.model_revision,
+            max_seq_length=a.max_seq_length,
+            lora_r=a.lora_r,
+            lora_alpha=a.lora_alpha,
+            epochs=a.epochs,
+            learning_rate=a.learning_rate,
+            grad_accum=a.grad_accum,
+            seed=a.seed,
+            tiled_mlp=a.tiled_mlp,
+            eval=not a.no_eval,
+            merge_16bit=a.merge_16bit,
+            push_to_hub=a.push_to_hub,
+        )
+    )
 
 
 if __name__ == "__main__":
