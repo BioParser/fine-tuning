@@ -18,6 +18,7 @@ RTX 2060 Max-Q with 6 GB of VRAM. Run this command in the repository folder:
 
 ```bash
 uv sync
+uv run unsloth install-kernels causal_conv1d
 ```
 
 The command installs the tested package versions from `uv.lock`.
