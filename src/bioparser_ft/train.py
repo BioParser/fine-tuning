@@ -315,7 +315,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     ap.add_argument("--learning-rate", type=float, default=d.learning_rate)
     ap.add_argument("--grad-accum", type=int, default=d.grad_accum)
     ap.add_argument("--seed", type=int, default=d.seed)
-    ap.add_argument("--tiled-mlp", action="store_true", help="lower activation memory at long context")
+    ap.add_argument(
+        "--tiled-mlp",
+        action=argparse.BooleanOptionalAction,
+        default=d.tiled_mlp,
+        help="tiled MLP: less activation memory at long context. On by default; --no-tiled-mlp turns it off",
+    )
     ap.add_argument("--no-eval", action="store_true")
     ap.add_argument("--merge-16bit", action="store_true", help="also save merged 16-bit weights")
     ap.add_argument("--push-to-hub", metavar="REPO_ID", help="upload adapter to a PRIVATE hub repo")
