@@ -4,70 +4,9 @@ This folder contains the client data. **Git does not track the files in this fol
 tracks only this README and `manifest.example.tsv`.** The files are confidential client data
 and copyrighted articles. Do not commit them.
 
-## Quickstart
-
-Do these steps in the root folder of the repository. Each step uses the results of the step
-before it. The commands use the default paths. For this reason, no more options are necessary.
-
-Before you start:
-
-- Put the client ETS files in `fine_tuning_data/ets_tsv/`.
-- In step 1, write your email address in place of `you@helsinki.fi`. The scholarly APIs ask
-  for an email address. The command sends it only to these APIs, not to the publishers.
-
-**CAUTION:** Do step 1 outside the network of the university. On the university network, the
-automatic parts of step 1 also download articles that are not open access. The terms of the
-library do not let programs do this. For more information, refer to
-[Library access with EZproxy](#library-access-with-ezproxy).
-
-```bash
-# 0. Install the packages, the browser and the MinerU models. Do this step one time only.
-uv sync
-uv run playwright install chromium
-uvx --from "mineru==4.1.6" mineru-models-download --tier basic
-
-# 1. Get the PDF files. The command uses open-access sources first, then a headless browser.
-#    At the end, it opens a visible browser with the library proxy, and you get the other files.
-uv run bioparser-fetch-pdfs --email you@helsinki.fi --browser --manual \
-    --proxy-prefix "https://login.libproxy.helsinki.fi/login?url="
-
-# 1b. Optional: if you downloaded PDF files yourself, put them in fine_tuning_data/pdfs/_unverified/.
-#     Then link them to the papers. Without --apply, the command only shows the result.
-uv run bioparser-link-pdfs --apply
-
-# 2. Parse the PDF files with MinerU.
-scripts/parse_pdfs.sh
-
-# 3. Merge the parsed PDF files with the ETS files, and make the dataset.
-uv run bioparser-build-dataset
-
-# 4. Fine-tune the model on the GPU.
-uv run bioparser-train
-
-# 5. Optional: use the model on the test articles, and calculate the scores.
-uv run bioparser-predict --model outputs/qwen3.5-0.8b-ets/lora_adapter --dataset data/processed/test.jsonl --out outputs/preds_test.jsonl
-uv run bioparser-evaluate --dataset data/processed/test.jsonl --predictions outputs/preds_test.jsonl
-```
-
-| Step | Result | Examine |
-|---|---|---|
-| 1 | `fine_tuning_data/pdfs/`, `pdf_sources.tsv` and `manifest.tsv` | The rows with `not_found`, `unverified` or `unresolved` in `pdf_sources.tsv` |
-| 2 | `fine_tuning_data/parsed/*.zip` | The error messages of MinerU |
-| 3 | `data/processed/train.jsonl`, `val.jsonl`, `test.jsonl` and `build_report.json` | The excluded pairs in `build_report.json` |
-| 4 | `outputs/qwen3.5-0.8b-ets/lora_adapter/` | The training loss and the eval loss |
-| 5 | `outputs/preds_test.jsonl` and the scores | The F1 values for rows, cells and values |
-
-- The last part of step 1 waits for you. For each article, get the PDF file in the browser
-  window, or push Enter to go to the next article. The time limit for each article is 300
-  seconds. To change it, use `--manual-timeout`.
-- Step 1 writes the papers with more than one TSV file to `manifest.tsv`. Step 3 uses this file
-  automatically.
-- Step 4 uses the GPU. The first run downloads the model `Qwen/Qwen3.5-0.8B` from Hugging Face.
-- You can use the notebook in place of step 4. Start JupyterLab with `uv run jupyter lab`, and
-  then open `notebooks/Qwen3_5_0_8B.ipynb`.
-- When you do a step again, also do all the steps after it.
-
-The sections below give more information about each step.
+**NOTE:** Run all commands in the root folder of the repository, not in this folder. For all the
+steps, refer to the [Quickstart](../README.md#quickstart) in the root README. This file gives more
+information about steps 1, 2 and 3.
 
 ## Folder layout
 
@@ -86,9 +25,9 @@ fine_tuning_data/
 
 ## Step 1. Get the PDF files
 
-Step 1 gets one PDF file for each paper. The command of the Quickstart does all of step 1 in
-one run. You can also do the parts one at a time. Each part uses the results of the part
-before it.
+Step 1 gets one PDF file for each paper. The [Quickstart](../README.md#quickstart) does all of
+step 1 with one command. You can also do the parts one at a time. Each part uses the results of
+the part before it.
 
 **CAUTION:** Do step 1 outside the network of the university. Refer to
 [Library access with EZproxy](#library-access-with-ezproxy).
@@ -284,31 +223,36 @@ server. The scholarly APIs get 5 requests each second or less.
 ## Step 2. Parse the PDF files
 
 ```bash
-scripts/parse_pdfs.sh fine_tuning_data/pdfs fine_tuning_data/parsed
+scripts/parse_pdfs.sh
 ```
 
-The two folders are the default values. Without arguments, `scripts/parse_pdfs.sh` uses the
-same folders. The script runs `mineru-kit parse ... --format zip --tier basic` with MinerU
-4.1.6 in a separate `uvx` environment. MinerU parses the files on your computer.
+The script parses each PDF file in `fine_tuning_data/pdfs/` with MinerU. It writes one zip file
+for each PDF file to `fine_tuning_data/parsed/`. To use other folders, give them as arguments:
+`scripts/parse_pdfs.sh PDF_DIR OUT_DIR`.
+
+MinerU operates on your computer, in a separate `uvx` environment. The variable `MINERU_VERSION`
+sets the MinerU version. The default is 4.1.6. The variable `TIER` sets the models. The default is
+`basic`.
 
 **CAUTION:** Do not add the option `--remote` to MinerU. This option sends the client PDF files
 to the servers of MinerU.
 
-Set `MINERU_VERSION` to the MinerU version of the production system. The model learns the
-Markdown format of this version. Before the first parse, download the MinerU models for the same
-version. Do this one time only:
+The model learns the Markdown format of one MinerU version and tier. For this reason, use the
+same version and tier as production. The bioparser repository sets them in
+`docker/mineru.Dockerfile`. Compare the two repositories before you make the training data.
+
+If you change the version or the tier, download the models for them one time. Then give the
+version and the tier to the script. For example, for MinerU 4.1.6 and the tier `basic`:
 
 ```bash
 uvx --from "mineru==4.1.6" mineru-models-download --tier basic
+MINERU_VERSION=4.1.6 TIER=basic scripts/parse_pdfs.sh
 ```
 
-The old notebook had three manual steps. You do not do them now:
-
-- Number the files 001–999. The dataset builder finds the pairs by the file names.
-- Extract `markdown.md` from the zip files. The dataset builder reads `markdown.md` directly
-  from the zip file.
-- Filter the files by the page count. The training removes the examples that are too long. It
-  uses the exact token count.
+The old notebook had three manual steps. It numbered the files, it extracted `markdown.md` from
+the zip files, and it filtered the files by the page count. Now the tools do this work. The
+dataset builder finds the pairs by the file names, and it reads `markdown.md` directly from the
+zip file. The training removes the examples that are too long.
 
 ## Step 3. Make the dataset
 
@@ -342,13 +286,9 @@ before you add it.
 For each pair, the builder finds which numbers of the labels are also in the parsed text. The
 report shows this result as `value_coverage`. The builder removes the pairs below
 `--min-coverage`. The default value is 50%. Usually, these pairs have an incorrect PDF file,
-tables that the parser lost, or values from supplementary material. The 3 MinerU samples from
-the old notebook have 100% coverage.
+tables that the parser lost, or values from supplementary material.
 
-## Step 4. Fine-tune the model
-
-The command `uv run bioparser-train` trains a LoRA adapter for `Qwen/Qwen3.5-0.8B` with Unsloth.
-The [root README](../README.md) gives the options, the GPU notes and the evaluation.
+After step 3, train the model. Refer to [Training](../README.md#training) in the root README.
 
 ## Known problems in the labels of the 2026-09-14 delivery (181 TSV files, 175 papers)
 

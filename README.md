@@ -11,89 +11,116 @@ PDF --MinerU--> markdown --clean_markdown--> chat prompt --Qwen3.5+LoRA--> TSV -
              one training example = (parsed PDF, client ETS TSV)
 ```
 
+**NOTE:** Run all commands in the root folder of the repository, not in a subfolder. The
+commands use paths that start in the root folder.
+
+## Requirements
+
+- An NVIDIA GPU. The smallest GPU that we tested is an RTX 2060 Max-Q with 6 GB of VRAM.
+- An NVIDIA driver for CUDA 13.0, that is, the driver version 580 or newer. `uv.lock` contains
+  torch 2.10 for CUDA 13.0.
+- [uv](https://docs.astral.sh/uv/). uv installs Python 3.13 and all packages.
+
 ## Installation
 
-You need an NVIDIA GPU and [uv](https://docs.astral.sh/uv/). The smallest GPU that we tested is an
-RTX 2060 Max-Q with 6 GB of VRAM. Run this command in the repository folder:
+Do these steps one time:
 
 ```bash
+# Install the packages of uv.lock.
 uv sync
+
+# Install the CUDA kernels of causal_conv1d for the Qwen3.5 layers.
 uv run unsloth install-kernels causal_conv1d
+
+# Install the browser for bioparser-fetch-pdfs.
+uv run playwright install chromium
+
+# Download the MinerU models for scripts/parse_pdfs.sh.
+uvx --from "mineru==4.1.6" mineru-models-download --tier basic
 ```
 
-The command installs the tested package versions from `uv.lock`.
+**NOTE:** `uv sync` removes `causal_conv1d`, because `uv.lock` does not contain it. After each
+`uv sync`, install the kernels again. Or use `uv sync --inexact`, which does not remove packages.
 
-## Fine-tune the model
+If you install `causal_conv1d`, Unsloth uses it. Without it, Unsloth uses its own Triton
+kernels. If no prebuilt wheel agrees with your system, `install-kernels` compiles the kernels.
+This can take a long time.
 
-For a short list of all commands, refer to the [Quickstart](fine_tuning_data/README.md#quickstart).
+## Quickstart
+
+Before you start:
 
 1. Put the client ETS files in `fine_tuning_data/ets_tsv/`.
-2. Put one PDF file for each article in `fine_tuning_data/pdfs/`. The commands
-   `bioparser-fetch-pdfs` and `bioparser-link-pdfs` help you. For the procedure, refer to
-   [Step 1](fine_tuning_data/README.md#step-1-get-the-pdf-files).
+2. In step 1, write your email address in place of `you@helsinki.fi`. The scholarly APIs ask for
+   an email address. The command sends it only to these APIs, not to the publishers.
 
-   **CAUTION:** Do not run `bioparser-fetch-pdfs` on the network of the university. On this
-   network, the command also downloads articles that are not open access. The terms of the
-   library do not let programs do this.
+**CAUTION:** Do step 1 outside the network of the university. On the university network, the
+automatic parts of step 1 also download articles that are not open access. The terms of the
+library do not let programs do this. Refer to
+[Library access with EZproxy](fine_tuning_data/README.md#library-access-with-ezproxy).
 
-3. Parse the PDF files with MinerU:
+```bash
+# 1. Get the PDF files. The command uses open-access sources first, then a headless browser.
+#    At the end, it opens a visible browser with the library proxy, and you get the other files.
+uv run bioparser-fetch-pdfs --email you@helsinki.fi --browser --manual \
+    --proxy-prefix "https://login.libproxy.helsinki.fi/login?url="
 
-   ```bash
-   scripts/parse_pdfs.sh
-   ```
+# 1b. Optional: link the PDF files that you downloaded yourself. Put them in
+#     fine_tuning_data/pdfs/_unverified/ first. Without --apply, the command only shows the result.
+uv run bioparser-link-pdfs --apply
 
-   The script writes one zip file for each PDF file to `fine_tuning_data/parsed/`. Use the MinerU
-   version of production. The variable `MINERU_VERSION` sets the version.
+# 2. Parse the PDF files with MinerU.
+scripts/parse_pdfs.sh
 
-4. Make the dataset:
+# 3. Merge the parsed PDF files with the ETS files, and make the dataset.
+uv run bioparser-build-dataset
 
-   ```bash
-   uv run bioparser-build-dataset
-   ```
+# 4. Fine-tune the model on the GPU.
+uv run bioparser-train
 
-   The command writes `train.jsonl`, `val.jsonl` and `test.jsonl` to `data/processed/`. Examine the
-   pairs that the command did not use in `data/processed/build_report.json`.
+# 5. Optional: use the model on the test articles, and calculate the scores.
+uv run bioparser-predict --model outputs/qwen3.5-0.8b-ets/lora_adapter \
+    --dataset data/processed/test.jsonl --out outputs/preds_test.jsonl
+uv run bioparser-evaluate --dataset data/processed/test.jsonl --predictions outputs/preds_test.jsonl
+```
 
-5. Train the model:
+| Step | Result | Examine | More information |
+|---|---|---|---|
+| 1 | `fine_tuning_data/pdfs/`, `pdf_sources.tsv` and `manifest.tsv` | The papers without a PDF file | [Step 1](fine_tuning_data/README.md#step-1-get-the-pdf-files) |
+| 2 | `fine_tuning_data/parsed/*.zip` | The error messages of MinerU | [Step 2](fine_tuning_data/README.md#step-2-parse-the-pdf-files) |
+| 3 | `data/processed/train.jsonl`, `val.jsonl`, `test.jsonl` and `build_report.json` | The pairs that the command did not use | [Step 3](fine_tuning_data/README.md#step-3-make-the-dataset) |
+| 4 | `outputs/qwen3.5-0.8b-ets/lora_adapter/` | The training loss and the eval loss | [Training](#training) |
+| 5 | `outputs/preds_test.jsonl` and the scores | The precision, the recall and the F1 score for rows, cells and values | |
 
-   ```bash
-   uv run bioparser-train
-   ```
+- The last part of step 1 waits for you. For each article, get the PDF file in the browser
+  window, or push Enter to go to the next article.
+- The first run of step 4 downloads the model `Qwen/Qwen3.5-0.8B` from Hugging Face.
+- You can use the notebook `notebooks/Qwen3_5_0_8B.ipynb` in place of step 4. Start JupyterLab
+  with `uv run jupyter lab`. The notebook uses the same functions as the commands.
+- When you do a step again, also do all the steps after it.
 
-   The command saves the LoRA adapter in `outputs/qwen3.5-0.8b-ets/lora_adapter/`. You can also
-   use the notebook `notebooks/Qwen3_5_0_8B.ipynb`. The notebook uses the same functions.
+## Training
 
-6. Use the adapter on the test articles:
-
-   ```bash
-   uv run bioparser-predict --model outputs/qwen3.5-0.8b-ets/lora_adapter --dataset data/processed/test.jsonl --out outputs/preds_test.jsonl
-   ```
-
-7. Calculate the precision, the recall and the F1 score for rows, cells and values:
-
-   ```bash
-   uv run bioparser-evaluate --dataset data/processed/test.jsonl --predictions outputs/preds_test.jsonl
-   ```
-
-### Training options
+The command `uv run bioparser-train` trains a LoRA adapter with Unsloth. It saves the adapter in
+`outputs/qwen3.5-0.8b-ets/lora_adapter/`.
 
 | Option | Default | Description |
 |---|---|---|
+| `--max-seq-length N` | 65536 | The maximum number of tokens for the prompt, the article and the TSV table |
+| `--tiled-mlp`, `--no-tiled-mlp` | On | Tiled MLP uses less GPU memory for long sequences. On a GPU with much memory, use `--no-tiled-mlp`. |
 | `--model-revision HASH` | The newest commit | The commit of the base model on Hugging Face. Use it to train on the same weights in each run. |
-| `--max-seq-length N` | 16384 | The maximum number of tokens for the prompt, the article and the TSV table. |
-| `--tiled-mlp` | Off | Use less GPU memory for long sequences, for example 32,768 tokens. |
-| `--merge-16bit` | Off | Also save a merged 16-bit model for vLLM. |
-| `--push-to-hub REPO` | Off | Upload the adapter to a private Hugging Face repository. |
+| `--merge-16bit` | Off | Also save a merged 16-bit model for vLLM |
+| `--push-to-hub REPO` | Off | Upload the adapter to a private Hugging Face repository |
 
 For all options, run `uv run bioparser-train --help`.
 
-### GPU memory
+GPU memory:
 
-- GPUs without bf16, for example RTX 20xx and T4, train Qwen3.5 in float32.
+- GPUs without bf16, for example the RTX 20xx and the T4, train Qwen3.5 in float32.
 - When the VRAM is too small, Unsloth moves data to the CPU RAM. The training command sets these
   options.
-- A typical example has 6,000 to 15,000 tokens. The command removes the examples that are longer
-  than `--max-seq-length`. It does not cut an example, because a cut removes the answer.
+- The command removes the examples that are longer than `--max-seq-length`. It does not cut an
+  example, because a cut removes the answer.
 
 ## Output format
 
@@ -102,13 +129,14 @@ API use this file.
 
 - The model writes 19 of the 20 ETS columns. The function `to_ets_records` adds the column
   `author` with the value `BioParser`.
-- The model writes the citation (`references`) only on the first row. `to_ets_records` copies it
+- The model writes the citation, the column `references`, only on the first row. `to_ets_records` copies it
   to the other rows. If the API has a correct citation, give it with `references=`.
-- `to_ets_records` also uses fixed rules. It finds an empty `taxonRank` from the name. It writes
-  the full genus name for `H. sapiens`. It changes forms such as `males` to `Male`.
+- `to_ets_records` also uses fixed rules. It finds an empty `taxonRank` from the name. It changes
+  forms such as `males` to `Male`. It writes the full genus name for an abbreviation such as
+  `H. sapiens`, if only one genus in the output starts with this letter.
 
-**CAUTION:** If you change the columns, the prompt or the text cleaning, increase `PROMPT_VERSION`
-in `src/bioparser_ft/schema.py`. Then make the dataset again and train the model again. The tools
+**CAUTION:** If you change the columns, the prompt or the rules that clean the text, increase
+`PROMPT_VERSION` in `src/bioparser_ft/schema.py`. Then make the dataset again and train the model again. The tools
 stop with an error when the dataset or the model has a different `PROMPT_VERSION`.
 
 ## Use the model in an API
@@ -154,6 +182,10 @@ def parse(req: ParseRequest) -> dict:  # A sync function: FastAPI runs it in a w
     # {"records": [...20 ETS columns...], "warnings": [...], "complete": bool}
     return {"records": result.records, "warnings": result.warnings, "complete": result.complete}
 ```
+
+The example uses 32,768 tokens. The training uses examples with up to 65,536 tokens. For longer
+articles, give a larger `max_seq_length` to `load_for_inference` and to `generate_tsv`, if the
+GPU has enough memory.
 
 **CAUTION:** Set the read timeout of the client and of the reverse proxy to more than the longest
 generation. One generation can take minutes on a small GPU. If the client sends the request again,
@@ -201,6 +233,6 @@ Install the Git hooks one time:
 uv run pre-commit install
 ```
 
-Before each commit, the hooks run ruff and mypy, and they stop client data, model weights and
-tokens. CI runs the same checks and the tests. CI has no GPU. For this reason, test changes to the
-training code on a computer with a GPU.
+Before each commit, the hooks run ruff and mypy. They also stop client data, model weights,
+tokens and notebooks with outputs. CI runs the same checks and the tests. CI has no GPU. For this
+reason, test changes to the training code on a computer with a GPU.
