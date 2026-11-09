@@ -109,6 +109,7 @@ The command `uv run bioparser-train` trains a LoRA adapter with Unsloth. It save
 | `--max-seq-length N` | 65536 | The maximum number of tokens for the prompt, the article and the TSV table |
 | `--tiled-mlp`, `--no-tiled-mlp` | On | Tiled MLP uses less GPU memory for long sequences. On a GPU with much memory, use `--no-tiled-mlp`. |
 | `--model-revision HASH` | The newest commit | The commit of the base model on Hugging Face. Use it to train on the same weights in each run. |
+| `--resume` | Off | Continue an interrupted training from the last checkpoint in `outputs/qwen3.5-0.8b-ets/checkpoints/`. Use the same dataset and options. |
 | `--merge-16bit` | Off | Also save a merged 16-bit model for vLLM |
 | `--push-to-hub REPO` | Off | Upload the adapter to a private Hugging Face repository |
 
