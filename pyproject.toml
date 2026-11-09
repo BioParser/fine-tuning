@@ -10,20 +10,22 @@ authors = [
 # verified 3.14 combination, so uv refuses other versions instead of guessing.
 requires-python = ">=3.13,<3.14"
 dependencies = [
-    # GPU training stack, pinned to the combination that ran on the RTX 2060:
-    # Unsloth 2026.11.1, transformers 5.2.0, TRL 0.22.2, torch 2.14.1+cu130.
+    # GPU training stack. uv.lock has these versions: Unsloth 2026.11.1, transformers 5.17.0,
+    # TRL 0.22.2, torch 2.10.0+cu130 and xformers 0.0.35.
     # unsloth 2026.11.1 requires transformers<=5.17.0, trl<=1.15.0, datasets<5,
     # torch<2.15. The previous pins (transformers>=5.20.2, trl>=1.16.0,
     # datasets>=5.1.0) could not be installed together with Unsloth, which is
     # why the notebook pip-installed packages into the venv behind uv's back.
-    # transformers 5.17.0 replaces 5.2.0, because 5.2.0 has 4 security advisories
-    # (GHSA-29pf-2h5f-8g72, GHSA-fgcw-684q-jj6r, GHSA-xrqw-3rrv-vx5w, GHSA-x9r9-c232-4q39).
+    # transformers 5.17.0 replaces 5.2.0 of the first RTX 2060 run, because 5.2.0 has 4 security
+    # advisories (GHSA-29pf-2h5f-8g72, GHSA-fgcw-684q-jj6r, GHSA-xrqw-3rrv-vx5w, GHSA-x9r9-c232-4q39).
     # 5.17.0 is the newest version that unsloth 2026.11.1 accepts.
+    # CAUTION: an xformers wheel operates only with the torch version that it was built for, but its
+    # metadata does not limit the torch version. Upgrade torch and xformers together.
     "unsloth==2026.11.1",
     "unsloth-zoo==2026.11.1",
     "torch==2.10.0",
-	"torchvision==0.25.0",
-	"xformers",
+    "torchvision==0.25.0",
+    "xformers",
     "transformers==5.17.0",
     "trl==0.22.2",
     "datasets>=4.3,<5",

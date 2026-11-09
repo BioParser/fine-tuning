@@ -35,22 +35,54 @@ class Generation:
     seconds: float
 
 
+def read_training_metadata(model_path: str | Path) -> dict[str, Any] | None:
+    """Return the bioparser_ft.json of train.save_artifacts, or None if the folder has no such file."""
+    meta_path = Path(model_path) / "bioparser_ft.json"
+    if not meta_path.is_file():  # For example, a Hub id
+        return None
+    meta: dict[str, Any] = json.loads(meta_path.read_text(encoding="utf-8"))
+    return meta
+
+
 def check_prompt_version(model_path: str | Path) -> None:
     """Stop if the model was trained with a different PROMPT_VERSION.
 
     With a different version, the model gets a prompt that it did not learn. Then the output is
     worse, but no error occurs. train.save_artifacts writes the version to bioparser_ft.json.
     """
-    meta_path = Path(model_path) / "bioparser_ft.json"
-    if not meta_path.is_file():  # For example, a Hub id
-        log.warning("Cannot examine the prompt version: %s does not exist", meta_path)
+    meta = read_training_metadata(model_path)
+    if meta is None:
+        log.warning(
+            "Cannot examine the prompt version: %s does not exist", Path(model_path) / "bioparser_ft.json"
+        )
         return
-    trained = json.loads(meta_path.read_text(encoding="utf-8")).get("prompt_version")
+    trained = meta.get("prompt_version")
     if trained != PROMPT_VERSION:
         raise ValueError(
             f"{model_path} was trained with prompt_version {trained!r}, but the code uses "
             f"{PROMPT_VERSION!r}. Train the model again, or use the code of its version."
         )
+
+
+def check_base_model(model: Any, model_path: str | Path) -> bool:
+    """Warn if the loaded base weights are not the base weights of the training. Return False then.
+
+    For an adapter folder, Unsloth loads the base model by name and ignores `revision` for it, so it
+    gets the newest commit on the Hub. If that commit changed after the training, the adapter
+    operates on other weights: the output can be worse, but no error occurs. A merged model has
+    its own weights, and a local base model has no commit, so the check does nothing for them.
+    """
+    trained = (read_training_metadata(model_path) or {}).get("base_model_commit")
+    loaded = getattr(getattr(model, "config", None), "_commit_hash", None)
+    if trained and loaded and trained != loaded:
+        log.warning(
+            "The base model commit %s is not the commit of the training (%s). Use the merged model of "
+            "bioparser-train --merge-16bit, or train the adapter again on this commit.",
+            loaded,
+            trained,
+        )
+        return False
+    return True
 
 
 def load_for_inference(model_path: str | Path, *, max_seq_length: int = 32768) -> tuple[Any, Any]:
@@ -65,6 +97,7 @@ def load_for_inference(model_path: str | Path, *, max_seq_length: int = 32768) -
     model, processor = FastLanguageModel.from_pretrained(
         model_name=str(model_path), max_seq_length=max_seq_length, load_in_4bit=False
     )
+    check_base_model(model, model_path)
     FastLanguageModel.for_inference(model)
     return model, processor
 

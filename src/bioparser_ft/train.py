@@ -18,8 +18,8 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
-import math
 import os
+import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
@@ -60,17 +60,15 @@ class TrainConfig:
     max_seq_length: int = 65536  # still need a bit longer to fit all PDFs
     # still few long PDFs are dropped if exceeds msl
 
-    # LoRA:   W' = W + (alpha/r) BA
-    #
-    # r, rank 16: trainable parameters 32,768
-    # r, rank 64: trainable parameters 131,072
-    #
-    # r = 16, alpha = 32 =>   32/16=2 stronger update
-    #
-    # r = 64, alpha = 64 =>   64/64=1 but larger adapter
-    #
-    lora_r: int = 16  # lower rank -> less trainable parameters -> worse fine-tu
-    lora_alpha: int = 16  # how strongly the LoRA update affects the weights
+    # LoRA: W' = W + (alpha / r) * B @ A, with A of shape (r, d_in) and B of shape (d_out, r).
+    # Each adapted linear layer adds r * (d_in + d_out) trainable parameters: 32,768 for one
+    # 1024 x 1024 layer with r = 16, and 131,072 with r = 64. The adapter has the sum for all the
+    # adapted layers (model.print_trainable_parameters() shows it).
+    # alpha / r is the scale of the update: r = 16 with alpha = 32 gives 2, r = 64 with alpha = 64
+    # gives 1. If you change r, also change alpha to keep the scale. A higher rank is not always
+    # better: with a small dataset, it can learn the noise of the labels.
+    lora_r: int = 16
+    lora_alpha: int = 16  # The scale alpha / r is 1
     lora_dropout: float = 0.0  # 0 enables Unsloth's fast LoRA kernels
     target_modules: tuple[str, ...] = LORA_TARGET_MODULES
 
@@ -84,9 +82,14 @@ class TrainConfig:
     seed: int = 3407
     tiled_mlp: bool = True  # False if enough compute
     eval: bool = True
+    resume: bool = False  # continue from the last checkpoint in output_dir/checkpoints
     merge_16bit: bool = False
     push_to_hub: str | None = None  # private repo id; token from $HF_TOKEN or `hf auth login`
     extra: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.warmup_fraction < 1.0:
+            raise ValueError(f"warmup_fraction must be in [0, 1), not {self.warmup_fraction}")
 
 
 def read_split(dataset_dir: Path, split: str) -> list[dict[str, Any]]:
@@ -99,6 +102,18 @@ def read_split(dataset_dir: Path, split: str) -> list[dict[str, Any]]:
     if stale:
         raise ValueError(f"{path} built with prompt_version {stale}, code is {PROMPT_VERSION}: rebuild it")
     return rows
+
+
+def last_checkpoint(folder: Path) -> Path | None:
+    """Return the checkpoint-<step> folder with the largest step, or None. The rule of transformers."""
+    if not folder.is_dir():
+        return None
+    steps = [
+        (int(m[1]), path)
+        for path in folder.iterdir()
+        if path.is_dir() and (m := re.fullmatch(r"checkpoint-(\d+)", path.name))
+    ]
+    return max(steps)[1] if steps else None
 
 
 def _sha256(path: Path) -> str | None:
@@ -167,8 +182,6 @@ def build_trainer(
     from datasets import Dataset
     from trl import SFTConfig, SFTTrainer
 
-    steps_per_epoch = math.ceil(len(train_rows) / (cfg.batch_size * cfg.grad_accum))
-    total_steps = max(1, math.ceil(steps_per_epoch * cfg.epochs))
     has_eval = cfg.eval and bool(val_rows)
     args = SFTConfig(
         output_dir=str(cfg.output_dir / "checkpoints"),
@@ -181,7 +194,9 @@ def build_trainer(
         gradient_accumulation_steps=cfg.grad_accum,
         num_train_epochs=cfg.epochs,
         learning_rate=cfg.learning_rate,
-        warmup_steps=max(1, round(cfg.warmup_fraction * total_steps)),
+        # transformers 5 reads a value below 1 as a fraction of the optimizer steps. The Trainer knows the
+        # real number of steps, also when more than one GPU gives the examples of one step.
+        warmup_steps=cfg.warmup_fraction,
         lr_scheduler_type="linear",
         weight_decay=cfg.weight_decay,
         optim="adamw_8bit",
@@ -227,6 +242,9 @@ def run(cfg: TrainConfig) -> Path:
         raise SystemExit(f"no training data in {cfg.dataset_dir}; run bioparser-build-dataset first")
     if cfg.model_revision is None:
         print(f"WARNING: no --model-revision. The Hub gives the newest commit of {cfg.model_name}.")
+    resume_from = last_checkpoint(cfg.output_dir / "checkpoints") if cfg.resume else None
+    if cfg.resume and resume_from is None:
+        raise SystemExit(f"--resume: there is no checkpoint in {cfg.output_dir / 'checkpoints'}")
 
     model, processor = load_model(cfg)
     import torch  # after unsloth
@@ -249,7 +267,9 @@ def run(cfg: TrainConfig) -> Path:
     if problems := check_label_masking(trainer.train_dataset, processor):
         raise SystemExit(f"label masking problems: {problems}")
 
-    stats = trainer.train()
+    if resume_from is not None:
+        print(f"resume from {resume_from}. Use the same dataset and options as the first run.")
+    stats = trainer.train(resume_from_checkpoint=str(resume_from) if resume_from else None)
     if torch.cuda.is_available():
         print(f"peak reserved VRAM: {torch.cuda.max_memory_reserved() / 2**30:.2f} GiB")
     return save_artifacts(cfg, model, processor, train_rows, val_rows, dropped + val_dropped, stats.metrics)
@@ -322,6 +342,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="tiled MLP: less activation memory at long context. On by default; --no-tiled-mlp turns it off",
     )
     ap.add_argument("--no-eval", action="store_true")
+    ap.add_argument(
+        "--resume",
+        action="store_true",
+        help="continue an interrupted training from the last checkpoint in OUTPUT_DIR/checkpoints",
+    )
     ap.add_argument("--merge-16bit", action="store_true", help="also save merged 16-bit weights")
     ap.add_argument("--push-to-hub", metavar="REPO_ID", help="upload adapter to a PRIVATE hub repo")
     a = ap.parse_args(argv)
@@ -340,6 +365,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             seed=a.seed,
             tiled_mlp=a.tiled_mlp,
             eval=not a.no_eval,
+            resume=a.resume,
             merge_16bit=a.merge_16bit,
             push_to_hub=a.push_to_hub,
         )
