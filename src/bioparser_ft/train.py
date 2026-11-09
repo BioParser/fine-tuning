@@ -10,6 +10,10 @@ Memory on small GPUs (developed against an RTX 2060 Max-Q, 6 GB):
 Precision: GPUs without bf16 (RTX 20xx, T4) train Qwen3.5 in float32. Unsloth
 forces it: the Gated-DeltaNet layers give NaN gradients in float16. 4-bit QLoRA
 is not recommended for Qwen3.5, so the base stays 16-bit.
+
+More than one GPU: --num-gpus 2 starts one training process for each GPU with torchrun
+(data parallel, see distributed.py). The effective batch and the number of optimizer steps
+are the same as with 1 GPU. Only the first process writes the files.
 """
 
 from __future__ import annotations
@@ -20,13 +24,14 @@ import importlib.metadata
 import json
 import os
 import re
+import sys
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import __version__
+from . import __version__, distributed
 from .chat import (
     INSTRUCTION_PART,
     RESPONSE_PART,
@@ -82,6 +87,7 @@ class TrainConfig:
     seed: int = 3407
     tiled_mlp: bool = True  # False if enough compute
     eval: bool = True
+    num_gpus: int = 1  # Data parallel; more than 1 needs torchrun (bioparser-train --num-gpus)
     resume: bool = False  # continue from the last checkpoint in output_dir/checkpoints
     merge_16bit: bool = False
     push_to_hub: str | None = None  # private repo id; token from $HF_TOKEN or `hf auth login`
@@ -90,6 +96,13 @@ class TrainConfig:
     def __post_init__(self) -> None:
         if not 0.0 <= self.warmup_fraction < 1.0:
             raise ValueError(f"warmup_fraction must be in [0, 1), not {self.warmup_fraction}")
+        distributed.per_device_grad_accum(self.grad_accum, self.num_gpus)  # Raises if not a multiple
+
+
+def _info(message: str) -> None:
+    """Show a progress message one time: with more than one GPU, only the first process shows it."""
+    if distributed.is_main_process():
+        print(message, flush=True)
 
 
 def read_split(dataset_dir: Path, split: str) -> list[dict[str, Any]]:
@@ -191,7 +204,8 @@ def build_trainer(
         dataset_num_proc=1,
         per_device_train_batch_size=cfg.batch_size,
         per_device_eval_batch_size=1,
-        gradient_accumulation_steps=cfg.grad_accum,
+        # The effective batch is batch_size * grad_accum for each number of GPUs
+        gradient_accumulation_steps=distributed.per_device_grad_accum(cfg.grad_accum, cfg.num_gpus),
         num_train_epochs=cfg.epochs,
         learning_rate=cfg.learning_rate,
         # transformers 5 reads a value below 1 as a fraction of the optimizer steps. The Trainer knows the
@@ -237,11 +251,16 @@ def push_private(folder: Path, repo_id: str) -> None:
 
 def run(cfg: TrainConfig) -> Path:
     # Cheap checks first: fail before a multi-minute model load.
+    if cfg.num_gpus != distributed.world_size():
+        raise SystemExit(
+            f"num_gpus is {cfg.num_gpus}, but {distributed.world_size()} training processes run. "
+            "Use bioparser-train --num-gpus, which starts one process for each GPU."
+        )
     train_raw, val_raw = read_split(cfg.dataset_dir, "train"), read_split(cfg.dataset_dir, "val")
     if not train_raw:
         raise SystemExit(f"no training data in {cfg.dataset_dir}; run bioparser-build-dataset first")
     if cfg.model_revision is None:
-        print(f"WARNING: no --model-revision. The Hub gives the newest commit of {cfg.model_name}.")
+        _info(f"WARNING: no --model-revision. The Hub gives the newest commit of {cfg.model_name}.")
     resume_from = last_checkpoint(cfg.output_dir / "checkpoints") if cfg.resume else None
     if cfg.resume and resume_from is None:
         raise SystemExit(f"--resume: there is no checkpoint in {cfg.output_dir / 'checkpoints'}")
@@ -250,16 +269,22 @@ def run(cfg: TrainConfig) -> Path:
     import torch  # after unsloth
 
     attached = lora_report(model)
-    print(f"LoRA modules per target: {dict(attached)}")
+    _info(f"LoRA modules per target: {dict(attached)}")
     if missing := [t for t in cfg.target_modules if not attached.get(t)]:
-        print(f"WARNING: no adapters attached to {missing}")
+        _info(f"WARNING: no adapters attached to {missing}")
 
     if problems := check_prompt(processor, train_raw[0]["messages"]):
         raise SystemExit(f"prompt rendering problems: {problems}")
     train_rows, dropped = prepare_training_texts(processor, train_raw, cfg.max_seq_length)
     val_rows, val_dropped = prepare_training_texts(processor, val_raw, cfg.max_seq_length)
-    print(f"train: {len(train_rows)} kept, {len(dropped)} longer than {cfg.max_seq_length} tokens dropped")
-    print(f"val:   {len(val_rows)} kept, {len(val_dropped)} dropped")
+    _info(f"train: {len(train_rows)} kept, {len(dropped)} longer than {cfg.max_seq_length} tokens dropped")
+    _info(f"val:   {len(val_rows)} kept, {len(val_dropped)} dropped")
+    if cfg.num_gpus > 1:
+        accum = distributed.per_device_grad_accum(cfg.grad_accum, cfg.num_gpus)
+        _info(
+            f"{cfg.num_gpus} GPUs: each GPU accumulates {accum} steps; "
+            f"effective batch {cfg.batch_size * cfg.grad_accum}, as on 1 GPU"
+        )
     if not train_rows:
         raise SystemExit("every training example is longer than max_seq_length")
 
@@ -268,11 +293,16 @@ def run(cfg: TrainConfig) -> Path:
         raise SystemExit(f"label masking problems: {problems}")
 
     if resume_from is not None:
-        print(f"resume from {resume_from}. Use the same dataset and options as the first run.")
+        _info(f"resume from {resume_from}. Use the same dataset and options as the first run.")
     stats = trainer.train(resume_from_checkpoint=str(resume_from) if resume_from else None)
-    if torch.cuda.is_available():
-        print(f"peak reserved VRAM: {torch.cuda.max_memory_reserved() / 2**30:.2f} GiB")
-    return save_artifacts(cfg, model, processor, train_rows, val_rows, dropped + val_dropped, stats.metrics)
+    if torch.cuda.is_available():  # Each process shows the memory of its GPU
+        gpu = f"GPU {torch.cuda.current_device()} " if cfg.num_gpus > 1 else ""
+        print(f"{gpu}peak reserved VRAM: {torch.cuda.max_memory_reserved() / 2**30:.2f} GiB", flush=True)
+    adapter_dir = cfg.output_dir / "lora_adapter"
+    if trainer.is_world_process_zero():  # The other processes have the same weights: they write nothing
+        save_artifacts(cfg, model, processor, train_rows, val_rows, dropped + val_dropped, stats.metrics)
+    distributed.destroy_process_group()
+    return adapter_dir
 
 
 def save_artifacts(
@@ -333,7 +363,20 @@ def main(argv: Sequence[str] | None = None) -> None:
     ap.add_argument("--lora-alpha", type=int, default=d.lora_alpha)
     ap.add_argument("--epochs", type=float, default=d.epochs)
     ap.add_argument("--learning-rate", type=float, default=d.learning_rate)
-    ap.add_argument("--grad-accum", type=int, default=d.grad_accum)
+    ap.add_argument(
+        "--grad-accum",
+        type=int,
+        default=d.grad_accum,
+        help="gradient accumulation steps for 1 GPU. With N GPUs, each GPU accumulates GRAD_ACCUM / N steps.",
+    )
+    ap.add_argument(
+        "--num-gpus",
+        type=int,
+        choices=range(1, 9),
+        metavar="N",
+        help="the number of GPUs on this computer, for example 1 or 2 (default: 1). With more than 1, "
+        "the command starts one training process for each GPU with torchrun (data parallel).",
+    )
     ap.add_argument("--seed", type=int, default=d.seed)
     ap.add_argument(
         "--tiled-mlp",
@@ -349,7 +392,18 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     ap.add_argument("--merge-16bit", action="store_true", help="also save merged 16-bit weights")
     ap.add_argument("--push-to-hub", metavar="REPO_ID", help="upload adapter to a PRIVATE hub repo")
-    a = ap.parse_args(argv)
+    args = list(sys.argv[1:] if argv is None else argv)
+    a = ap.parse_args(args)
+    processes = distributed.world_size()  # More than 1 in a process that torchrun started
+    try:
+        distributed.per_device_grad_accum(a.grad_accum, a.num_gpus or processes)
+    except ValueError as exc:
+        ap.error(str(exc))  # Before torchrun starts: one clear message, not one error for each GPU
+    if processes == 1 and (a.num_gpus or 1) > 1:
+        # This process only starts torchrun. torchrun starts this module again, one time for each GPU.
+        raise SystemExit(distributed.launch(a.num_gpus, "bioparser_ft.train", args))
+    if a.num_gpus is not None and a.num_gpus != processes:
+        ap.error(f"--num-gpus {a.num_gpus}, but torchrun started {processes} processes")
     run(
         TrainConfig(
             dataset_dir=a.dataset_dir,
@@ -365,6 +419,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             seed=a.seed,
             tiled_mlp=a.tiled_mlp,
             eval=not a.no_eval,
+            num_gpus=processes,
             resume=a.resume,
             merge_16bit=a.merge_16bit,
             push_to_hub=a.push_to_hub,

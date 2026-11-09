@@ -19,6 +19,7 @@ Module overview (stdlib-only modules can be vendored into the FastAPI service):
 * ``build_dataset`` - CLI: builds train/val/test JSONL                   (stdlib only)
 * ``chat``        - chat-template rendering shared by train + inference (needs a tokenizer)
 * ``train`` / ``infer`` - Unsloth training and generation               (GPU stack)
+* ``distributed`` - start and coordinate one training process for each GPU (torchrun)
 """
 
 __version__ = "0.2.0"

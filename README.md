@@ -109,6 +109,8 @@ The command `uv run bioparser-train` trains a LoRA adapter with Unsloth. It save
 | `--max-seq-length N` | 65536 | The maximum number of tokens for the prompt, the article and the TSV table |
 | `--tiled-mlp`, `--no-tiled-mlp` | On | Tiled MLP uses less GPU memory for long sequences. On a GPU with much memory, use `--no-tiled-mlp`. |
 | `--model-revision HASH` | The newest commit | The commit of the base model on Hugging Face. Use it to train on the same weights in each run. |
+| `--num-gpus N` | 1 | The number of GPUs on this computer, for example 1 or 2. Refer to [Two GPUs](#two-gpus). |
+| `--grad-accum N` | 8 | The gradient accumulation steps for 1 GPU. The effective batch is N examples. |
 | `--resume` | Off | Continue an interrupted training from the last checkpoint in `outputs/qwen3.5-0.8b-ets/checkpoints/`. Use the same dataset and options. |
 | `--merge-16bit` | Off | Also save a merged 16-bit model for vLLM |
 | `--push-to-hub REPO` | Off | Upload the adapter to a private Hugging Face repository |
@@ -122,6 +124,24 @@ GPU memory:
   options.
 - The command removes the examples that are longer than `--max-seq-length`. It does not cut an
   example, because a cut removes the answer.
+
+### Two GPUs
+
+`uv run bioparser-train --num-gpus 2` trains on 2 GPUs of one computer. The command starts
+`torchrun`, and `torchrun` starts one training process for each GPU (data parallel). Each GPU has a
+full copy of the model and trains on a different half of the examples.
+
+- The effective batch does not change. Each GPU accumulates `--grad-accum / 2` steps, so
+  `--grad-accum` must be a multiple of 2. The number of optimizer steps is the same as on 1 GPU,
+  and each GPU does half of the work of each step.
+- Each process moves its own activations to the CPU RAM. Make sure that the computer has
+  sufficient RAM for 2 processes.
+- Only the first process writes the adapter, the metadata, the merged model and the progress
+  messages.
+- To select the GPUs, set `CUDA_VISIBLE_DEVICES`, for example `CUDA_VISIBLE_DEVICES=0,1`.
+- You can also start `torchrun` yourself:
+  `uv run torchrun --standalone --nproc-per-node 2 -m bioparser_ft.train`.
+- The notebook trains on 1 GPU only. A Jupyter kernel is one process.
 
 ## Output format
 
