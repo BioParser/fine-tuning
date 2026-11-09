@@ -619,6 +619,13 @@ def test_get_web_stops_a_slow_download() -> None:
     assert time.monotonic() - start < 1.5  # The full body needs 2 s
 
 
+def test_api_hosts_keep_their_rate_limit_with_a_small_delay() -> None:
+    client = PoliteClient(delay=0.05, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    assert client.delay_for("api.semanticscholar.org") == 1.1  # The shared pool gives 1 request each second
+    assert client.delay_for("api.crossref.org") == 0.2
+    assert client.delay_for("pub.example") == 0.05  # --delay is only for the other hosts
+
+
 def test_server_rate_limit_and_retry_after() -> None:
     calls: list[str] = []
 

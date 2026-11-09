@@ -102,6 +102,19 @@ def test_build_uses_default_manifest(ets_dir: Path, parsed_dir: Path, tmp_path: 
     assert report["unmatched_tsv"] == ["ETS_Nobody, 1999.tsv"]  # the "part 2" file has its pair
 
 
+def test_build_excludes_a_damaged_zip_and_continues(ets_dir: Path, parsed_dir: Path, tmp_path: Path) -> None:
+    broken = parsed_dir / "Nobody, 1999.zip"  # Pairs with ETS_Nobody, 1999.tsv by name
+    with zipfile.ZipFile(broken, "w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr("markdown.md", "Mus spretus T 66.2 mm. " * 20)
+    data = bytearray(broken.read_bytes())
+    data[data.index(b"Mus spretus")] ^= 0xFF  # The CRC-32 of the member is now wrong
+    broken.write_bytes(bytes(data))
+
+    report = build(ets_dir, parsed_dir, tmp_path / "processed", val_fraction=0.0, test_fraction=0.0)
+    assert report["excluded"]["nobody, 1999"].startswith("cannot read the parsed file")
+    assert report["counts"]["train"] >= 1  # The other examples are still in the dataset
+
+
 def test_build_without_manifest_file(ets_dir: Path, parsed_dir: Path, tmp_path: Path) -> None:
     report = build(ets_dir, parsed_dir, tmp_path / "processed", val_fraction=0.0, test_fraction=0.0)
     assert report["manifest"] is None

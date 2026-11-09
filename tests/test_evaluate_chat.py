@@ -64,6 +64,47 @@ def test_evaluate_files(tmp_path: Path) -> None:
     assert report["summary"]["row"]["f1"] == 1.0 and not report["summary"]["missing_predictions"]
 
 
+def _gold_tsv() -> str:
+    return "\n".join(["\t".join(MODEL_COLUMNS)] + ["\t".join(r[c] for c in MODEL_COLUMNS) for r in GOLD])
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> Path:
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    return path
+
+
+def test_evaluate_files_counts_a_missing_prediction_as_an_empty_table(tmp_path: Path) -> None:
+    tsv = _gold_tsv()
+    ds = _write_jsonl(
+        tmp_path / "test.jsonl",
+        [{"id": i, "messages": build_messages("x", tsv)} for i in ("p1", "p2")],
+    )
+    preds = _write_jsonl(tmp_path / "preds.jsonl", [{"id": "p1", "output": tsv, "complete": True}])
+    summary = evaluate_files(ds, preds)["summary"]
+    assert summary["missing_predictions"] == ["p2"]
+    assert summary["documents"] == 2
+    assert summary["row"]["recall"] == 0.5 and summary["row"]["precision"] == 1.0
+
+
+def test_evaluate_files_refuses_predictions_of_another_split(tmp_path: Path) -> None:
+    ds = _write_jsonl(tmp_path / "test.jsonl", [{"id": "p1", "messages": build_messages("x", _gold_tsv())}])
+    preds = _write_jsonl(tmp_path / "preds.jsonl", [{"id": "other", "output": "", "complete": True}])
+    with pytest.raises(ValueError, match="no prediction id"):
+        evaluate_files(ds, preds)  # Before the fix: the score 1.0 for 0 documents
+
+
+def test_evaluate_files_uses_the_last_line_of_a_duplicate_id(tmp_path: Path) -> None:
+    tsv = _gold_tsv()
+    ds = _write_jsonl(tmp_path / "test.jsonl", [{"id": "p1", "messages": build_messages("x", tsv)}])
+    preds = _write_jsonl(
+        tmp_path / "preds.jsonl",
+        [{"id": "p1", "output": "", "complete": False}, {"id": "p1", "output": tsv, "complete": True}],
+    )
+    summary = evaluate_files(ds, preds)["summary"]
+    assert summary["duplicate_predictions"] == ["p1"]
+    assert summary["documents"] == 1 and summary["row"]["f1"] == 1.0
+
+
 class StubTokenizer:
     """Minimal ChatML tokenizer; `honours_flag=False` mimics a template that ignores
     enable_thinking=False and opens a thinking block."""

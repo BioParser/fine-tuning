@@ -107,7 +107,26 @@ def build(
             warnings += [f"{tsv.name}: {w}" for w in table.warnings]
 
         example_id = pair.markdown.key
-        raw_markdown = pair.markdown.read_text()
+        try:
+            raw_markdown = pair.markdown.read_text()
+        except (OSError, ValueError) as exc:
+            # One damaged or too large parsed file must not stop the build of all the other examples
+            infos.append(
+                ExampleInfo(
+                    id=example_id,
+                    split=None,
+                    source_markdown=pair.markdown.path.name,
+                    source_tsvs=[p.name for p in pair.tsv_paths],
+                    n_rows=len(records),
+                    n_input_chars=0,
+                    value_coverage=None,
+                    name_coverage=None,
+                    missing_values_sample=[],
+                    excluded_reason=f"cannot read the parsed file: {exc}",
+                    warnings=warnings,
+                )
+            )
+            continue
         markdown = clean_markdown(raw_markdown)  # For the coverage check and the report
         cov = label_coverage(markdown, records)
         reason = None
