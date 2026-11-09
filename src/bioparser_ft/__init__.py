@@ -20,6 +20,7 @@ Module overview (stdlib-only modules can be vendored into the FastAPI service):
 * ``chat``        - chat-template rendering shared by train + inference (needs a tokenizer)
 * ``train`` / ``infer`` - Unsloth training and generation               (GPU stack)
 * ``distributed`` - start and coordinate one training process for each GPU (torchrun)
+* ``callbacks``   - extraction metrics on the validation articles after each epoch (GPU stack)
 """
 
 __version__ = "0.2.0"

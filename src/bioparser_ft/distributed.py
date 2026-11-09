@@ -47,6 +47,21 @@ def per_device_grad_accum(grad_accum: int, processes: int) -> int:
     return grad_accum // processes
 
 
+def balanced_shards(costs: Sequence[float], parts: int) -> list[list[int]]:
+    """Split the item indices into `parts` lists with approximately equal sums of the costs.
+
+    The rule gives the most expensive item to the list with the smallest sum (LPT rule). The
+    result is deterministic, so all the processes calculate the same split.
+    """
+    shards: list[list[int]] = [[] for _ in range(parts)]
+    loads = [0.0] * parts
+    for i in sorted(range(len(costs)), key=lambda i: (-costs[i], i)):
+        part = min(range(parts), key=lambda p: (loads[p], p))
+        shards[part].append(i)
+        loads[part] += costs[i]
+    return shards
+
+
 def torchrun_command(num_gpus: int, module: str, args: Sequence[str]) -> list[str]:
     """The command that starts `python -m module args` one time for each GPU."""
     return [

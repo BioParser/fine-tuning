@@ -13,7 +13,7 @@ from bioparser_ft.chat import (
     render_prompt,
     render_training_text,
 )
-from bioparser_ft.evaluate import aggregate, evaluate_files, score_document
+from bioparser_ft.evaluate import aggregate, evaluate_files, scalar_metrics, score_document
 from bioparser_ft.schema import MODEL_COLUMNS, build_messages
 
 
@@ -47,6 +47,29 @@ def test_scores() -> None:
     assert aggregate([score_document([], GOLD)])["cell"]["recall"] == 0.0
     numeric = aggregate([score_document([dict(GOLD[0]), dict(GOLD[1], verbatimTraitValue="81.7")], GOLD)])
     assert numeric["value"]["f1"] == 1.0  # "81.70" == "81.7"
+
+
+def test_accuracy_and_exact_match() -> None:
+    perfect = aggregate([score_document(list(reversed(GOLD)), GOLD)])
+    assert perfect["row"]["accuracy"] == perfect["cell"]["accuracy"] == 1.0
+    assert perfect["exact_match"] == 1.0  # The sequence of the rows does not matter
+
+    wrong = [dict(GOLD[0]), dict(GOLD[1], verbatimTraitValue="81.8")]
+    s = aggregate([score_document(wrong, GOLD), score_document(GOLD, GOLD)])
+    # Row level: TP = 1 + 2, FP = 1, FN = 1 -> accuracy = 3 / (3 + 1 + 1)
+    assert s["row"]["accuracy"] == pytest.approx(3 / 5)
+    assert s["exact_match"] == 0.5  # 1 of 2 documents
+
+    extra = aggregate([score_document([*GOLD, dict(GOLD[0], verbatimTraitName="X")], GOLD)])
+    assert extra["row"]["recall"] == 1.0 and extra["exact_match"] == 0.0  # One row too many
+    assert aggregate([score_document([], [])])["row"]["accuracy"] == 1.0  # Nothing to find, nothing found
+
+
+def test_scalar_metrics() -> None:
+    flat = scalar_metrics(aggregate([score_document(GOLD, GOLD)]))
+    assert flat["cell_f1"] == flat["value_accuracy"] == flat["exact_match"] == 1.0
+    assert len(flat) == 3 * 3 + 2 and all(isinstance(v, float) for v in flat.values())
+    assert "exact_match" not in scalar_metrics(aggregate([]))
 
 
 def test_scores_survive_extreme_numbers() -> None:

@@ -84,3 +84,20 @@ def test_main_refuses_a_grad_accum_that_is_not_a_multiple(monkeypatch: pytest.Mo
     with pytest.raises(SystemExit) as exit_info:
         train.main(["--num-gpus", "2", "--grad-accum", "3"])
     assert exit_info.value.code == 2  # The argparse error code
+
+
+def test_balanced_shards() -> None:
+    shards = distributed.balanced_shards([10.0, 1.0, 9.0, 2.0, 5.0], 2)
+    assert sorted(i for s in shards for i in s) == [0, 1, 2, 3, 4]  # Each article one time
+    loads = [sum([10.0, 1.0, 9.0, 2.0, 5.0][i] for i in s) for s in shards]
+    assert max(loads) - min(loads) <= 1.0  # 14 and 13: the GPUs wait little for each other
+    assert distributed.balanced_shards([3.0, 1.0], 1) == [[0, 1]]
+    assert distributed.balanced_shards([], 2) == [[], []]
+
+
+def test_train_config_validates_the_metric_options() -> None:
+    TrainConfig(best_metric="loss", eval_docs=0)
+    with pytest.raises(ValueError, match="best_metric"):
+        TrainConfig(best_metric="cell_f2")
+    with pytest.raises(ValueError, match="eval_docs"):
+        TrainConfig(eval_docs=-1)

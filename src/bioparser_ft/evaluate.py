@@ -7,8 +7,20 @@ computed on normalised values (case, whitespace, "5.20" == "5.2"):
 * cell  - (taxon, trait, column, value) facts for non-empty cells: robust to row
           order and to one wrong cell spoiling a whole row
 * value - cell metric restricted to the numeric columns (the core of the task)
+
+For each level, TP is the number of generated items that are also gold items, FP the other
+generated items, and FN the other gold items:
+
+* precision = TP / (TP + FP): the part of the generated items that are correct
+* f1        = 2 * precision * R / (precision + R), with R = TP / (TP + FN)
+* accuracy  = TP / (TP + FP + FN). An extraction task has no true negatives, so the usual
+              (TP + TN) / all is not defined. This is the Jaccard index of the two multisets.
+
+The code adds the counts of all documents, then it calculates these values (micro average).
+Two values are the part of the documents that agree (macro average):
+
+* exact_match      - the generated rows are the gold rows, in any sequence (row P = R = 1)
 * references_exact - citation identical
-Counts are summed over documents before computing P/R/F1 (micro average).
 
 CLI:  bioparser-evaluate --dataset data/processed/test.jsonl --predictions preds.jsonl
 """
@@ -30,6 +42,13 @@ from .tsv import parse_model_tsv
 SCORED_COLUMNS = tuple(c for c in MODEL_COLUMNS if c not in DOCUMENT_COLUMNS)
 KEY_COLUMNS = ("verbatimScientificName", "verbatimTraitName")
 METRICS = ("row", "cell", "value")
+SCORES = ("precision", "f1", "accuracy")
+# The keys of scalar_metrics(), for example "cell_f1"
+SCALAR_METRICS = (
+    *(f"{level}_{score}" for level in METRICS for score in SCORES),
+    "exact_match",
+    "references_exact",
+)
 
 
 def _norm(value: str) -> str:
@@ -45,11 +64,13 @@ def _norm(value: str) -> str:
         return v
 
 
-def _prf(tp: int, n_pred: int, n_gold: int) -> dict[str, float]:
+def _scores(tp: int, n_pred: int, n_gold: int) -> dict[str, float]:
     precision = tp / n_pred if n_pred else float(n_gold == 0)
     recall = tp / n_gold if n_gold else float(n_pred == 0)
     f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
-    return {"precision": precision, "recall": recall, "f1": f1}
+    union = n_pred + n_gold - tp  # TP + FP + FN
+    accuracy = tp / union if union else 1.0  # No generated and no gold items: nothing is wrong
+    return {"precision": precision, "recall": recall, "f1": f1, "accuracy": accuracy}
 
 
 def _facts(records: Iterable[Mapping[str, str]], columns: Sequence[str]) -> Counter[tuple[str, ...]]:
@@ -76,6 +97,7 @@ def score_document(pred: Sequence[Mapping[str, str]], gold: Sequence[Mapping[str
     ref_p = _norm(pred[0].get("references", "")) if pred else ""
     ref_g = _norm(gold[0].get("references", "")) if gold else ""
     out["references_exact"] = bool(ref_g) and ref_p == ref_g
+    out["exact_match"] = rows_p == rows_g
     out["rows_pred"], out["rows_gold"] = len(pred), len(gold)
     return out
 
@@ -86,12 +108,43 @@ def aggregate(doc_scores: Sequence[dict[str, Any]]) -> dict[str, Any]:
         tp = sum(d[name][0] for d in doc_scores)
         n_pred = sum(d[name][1] for d in doc_scores)
         n_gold = sum(d[name][2] for d in doc_scores)
-        result[name] = _prf(tp, n_pred, n_gold)
+        result[name] = _scores(tp, n_pred, n_gold)
     if doc_scores:
+        result["exact_match"] = sum(d["exact_match"] for d in doc_scores) / len(doc_scores)
         result["references_exact"] = sum(d["references_exact"] for d in doc_scores) / len(doc_scores)
         result["rows_pred"] = sum(d["rows_pred"] for d in doc_scores)
         result["rows_gold"] = sum(d["rows_gold"] for d in doc_scores)
     return result
+
+
+def scalar_metrics(summary: Mapping[str, Any]) -> dict[str, float]:
+    """Return the aggregate() values as one flat dict for a log, for example {"cell_f1": 0.8}."""
+    out = {f"{level}_{score}": float(summary[level][score]) for level in METRICS for score in SCORES}
+    for key in ("exact_match", "references_exact"):
+        if key in summary:  # Not there for 0 documents
+            out[key] = float(summary[key])
+    return out
+
+
+def format_summary(summary: Mapping[str, Any]) -> str:
+    """One line with the main values of aggregate(), for a progress log."""
+    cell = summary["cell"]
+    text = (
+        f"cell P {cell['precision']:.3f} F1 {cell['f1']:.3f} acc {cell['accuracy']:.3f}"
+        f", value F1 {summary['value']['f1']:.3f}, row F1 {summary['row']['f1']:.3f}"
+    )
+    if "exact_match" in summary:
+        text += f", exact match {summary['exact_match']:.3f}"
+    return f"{text} ({summary['documents']} documents)"
+
+
+def gold_tsv(example: Mapping[str, Any]) -> str | None:
+    """Return the gold TSV table of a dataset example, or None if it has no assistant turn."""
+    messages = example.get("messages") or []
+    if messages and messages[-1]["role"] == "assistant":
+        content: str = messages[-1]["content"]
+        return content
+    return None
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

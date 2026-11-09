@@ -6,6 +6,10 @@
     # a dataset split -> predictions JSONL for bioparser-evaluate
     uv run bioparser-predict --model outputs/qwen3.5-0.8b-ets/lora_adapter \\
         --dataset data/processed/test.jsonl --out outputs/preds_test.jsonl
+
+With --dataset, the command compares each prediction with the gold table of the example, if the
+example has one. It shows the metrics of the article and of all the articles until then. At the
+end, it shows the same summary as bioparser-evaluate.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from .chat import render_prompt, text_tokenizer
+from .evaluate import aggregate, format_summary, gold_tsv, score_output
 from .schema import PROMPT_VERSION, build_messages
 
 log = logging.getLogger(__name__)
@@ -118,8 +123,14 @@ def generate_from_messages(
     max_new_tokens: int = 8192,
     max_seq_length: int | None = None,
     streamer: Any = None,
+    inference_mode: bool = True,
 ) -> Generation:
-    """Greedy decoding (deterministic; sampling only adds noise to table extraction)."""
+    """Greedy decoding (deterministic; sampling only adds noise to table extraction).
+
+    inference_mode=False uses torch.no_grad() in place of torch.inference_mode(). Use it during
+    training: a tensor that inference mode makes, for example a longer rotary cache, cannot go
+    into autograd in the next training step.
+    """
     import torch
 
     tok = text_tokenizer(processor)
@@ -131,7 +142,7 @@ def generate_from_messages(
         return Generation("", False, n_prompt, 0, 0.0)
     stop = _stop_token_ids(tok)
     start = time.perf_counter()
-    with torch.inference_mode():
+    with torch.inference_mode() if inference_mode else torch.no_grad():
         out = model.generate(
             **enc,
             max_new_tokens=budget,
@@ -184,6 +195,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.out is None:
         ap.error("--out is required with --dataset")
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    scores: list[dict[str, Any]] = []  # One item for each example with a gold table
     with args.dataset.open(encoding="utf-8") as fin, args.out.open("w", encoding="utf-8") as fout:
         for line in fin:
             if not line.strip():
@@ -194,6 +206,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             fout.write(json.dumps(row, ensure_ascii=False) + "\n")
             fout.flush()
             print(f"{ex['id']}: {gen.new_tokens} tokens in {gen.seconds:.0f}s complete={gen.complete}")
+            if (gold := gold_tsv(ex)) is not None:
+                scores.append(score_output(gen.text, gold, complete=gen.complete))
+                print(f"    this article: {format_summary(aggregate(scores[-1:]))}")
+                print(f"    all articles: {format_summary(aggregate(scores))}")
+    if scores:
+        print(json.dumps(aggregate(scores), indent=2))
 
 
 if __name__ == "__main__":

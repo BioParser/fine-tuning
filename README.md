@@ -79,6 +79,7 @@ uv run bioparser-build-dataset
 uv run bioparser-train
 
 # 5. Optional: use the model on the test articles, and calculate the scores.
+#    bioparser-predict shows the metrics after each article. bioparser-evaluate gives the full report.
 uv run bioparser-predict --model outputs/qwen3.5-0.8b-ets/lora_adapter \
     --dataset data/processed/test.jsonl --out outputs/preds_test.jsonl
 uv run bioparser-evaluate --dataset data/processed/test.jsonl --predictions outputs/preds_test.jsonl
@@ -90,7 +91,7 @@ uv run bioparser-evaluate --dataset data/processed/test.jsonl --predictions outp
 | 2 | `fine_tuning_data/parsed/*.zip` | The error messages of MinerU | [Step 2](fine_tuning_data/README.md#step-2-parse-the-pdf-files) |
 | 3 | `data/processed/train.jsonl`, `val.jsonl`, `test.jsonl` and `build_report.json` | The pairs that the command did not use | [Step 3](fine_tuning_data/README.md#step-3-make-the-dataset) |
 | 4 | `outputs/qwen3.5-0.8b-ets/lora_adapter/` | The training loss and the eval loss | [Training](#training) |
-| 5 | `outputs/preds_test.jsonl` and the scores | The precision, the recall and the F1 score for rows, cells and values | |
+| 5 | `outputs/preds_test.jsonl` and the scores | The precision, the F1 score and the accuracy for rows, cells and values, and the exact match | [Metrics](#metrics) |
 
 - The last part of step 1 waits for you. For each article, get the PDF file in the browser
   window, or push Enter to go to the next article.
@@ -111,6 +112,9 @@ The command `uv run bioparser-train` trains a LoRA adapter with Unsloth. It save
 | `--model-revision HASH` | The newest commit | The commit of the base model on Hugging Face. Use it to train on the same weights in each run. |
 | `--num-gpus N` | 1 | The number of GPUs on this computer, for example 1 or 2. Refer to [Two GPUs](#two-gpus). |
 | `--grad-accum N` | 8 | The gradient accumulation steps for 1 GPU. The effective batch is N examples. |
+| `--eval-docs N` | All | The number of validation articles that the model writes a table for after each epoch. 0 turns the generation off: then the command calculates only `eval_loss`. |
+| `--eval-max-new-tokens N` | 8192 | The maximum number of tokens for each table after each epoch |
+| `--best-metric NAME` | `cell_f1` | The validation metric that selects the best checkpoint at the end. `loss` selects with `eval_loss`. |
 | `--resume` | Off | Continue an interrupted training from the last checkpoint in `outputs/qwen3.5-0.8b-ets/checkpoints/`. Use the same dataset and options. |
 | `--merge-16bit` | Off | Also save a merged 16-bit model for vLLM |
 | `--push-to-hub REPO` | Off | Upload the adapter to a private Hugging Face repository |
@@ -124,6 +128,22 @@ GPU memory:
   options.
 - The command removes the examples that are longer than `--max-seq-length`. It does not cut an
   example, because a cut removes the answer.
+
+### Metrics after each epoch
+
+After each epoch, the command calculates `eval_loss` on the validation articles. Then the model
+writes the TSV table of each validation article with greedy decoding, as `bioparser-predict` does,
+and the command calculates the [metrics](#metrics). The log shows them with the prefix `eval_`, for
+example `eval_cell_f1`, `eval_row_accuracy` and `eval_exact_match`.
+
+- At the end, the command loads the checkpoint with the best `--best-metric` and saves it as the
+  adapter. The file `bioparser_ft.json` of the adapter contains the metrics of each epoch
+  (`eval_history`).
+- The generation takes time: on a small GPU, minutes for each article. With `--eval-docs N`, the
+  command uses only the first N validation articles. With `--eval-docs 0`, it uses only `eval_loss`.
+- With 2 GPUs, each GPU writes the tables of approximately half of the articles.
+- The token accuracy of teacher forcing is not available. It needs the full logits, and Unsloth does
+  not keep them, to save memory.
 
 ### Two GPUs
 
@@ -142,6 +162,28 @@ full copy of the model and trains on a different half of the examples.
 - You can also start `torchrun` yourself:
   `uv run torchrun --standalone --nproc-per-node 2 -m bioparser_ft.train`.
 - The notebook trains on 1 GPU only. A Jupyter kernel is one process.
+
+## Metrics
+
+`bioparser-evaluate` compares the generated TSV table of each article with the gold table. It
+normalizes the values first, for example `5.20` is equal to `5.2`. It gives the metrics on 3 levels:
+
+- `row`: a full row, with all the generated columns except `references`.
+- `cell`: one fact, that is the taxon, the trait, the column and the value of one cell that is not empty.
+- `value`: the cell facts of the numeric columns only.
+
+TP is the number of generated items that are also gold items. FP is the number of the other
+generated items, and FN is the number of the other gold items. For each level:
+
+| Metric | Formula | Description |
+|---|---|---|
+| `precision` | TP / (TP + FP) | The part of the generated items that are correct |
+| `f1` | 2 * precision * R / (precision + R), with R = TP / (TP + FN) | The harmonic mean of precision and R |
+| `accuracy` | TP / (TP + FP + FN) | An extraction has no true negatives, so this is the Jaccard index |
+
+The code adds the counts of all the articles before it calculates these values (micro average).
+`exact_match` is the part of the articles where the generated rows are exactly the gold rows, in
+any sequence. `references_exact` is the part of the articles with the correct citation.
 
 ## Output format
 
