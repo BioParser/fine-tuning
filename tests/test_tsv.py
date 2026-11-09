@@ -80,6 +80,13 @@ def test_parse_repairs_and_warnings() -> None:
     cut = parse_model_tsv(_tsv(list(MODEL_COLUMNS), good, second[:3]), complete=False)
     assert len(cut.records) == 1  # partial last row dropped
 
+    # The cut is directly after a line break: the last row is full, so the parser keeps it
+    cut_after_row = parse_model_tsv(_tsv(list(MODEL_COLUMNS), good, second) + "\n", complete=False)
+    assert len(cut_after_row.records) == 2 and cut_after_row.records[1]["verbatimTraitValue"] == "2.5"
+    assert any("after a full row" in w for w in cut_after_row.warnings)
+    cut_blank_tail = parse_model_tsv(_tsv(list(MODEL_COLUMNS), good) + "\n \t", complete=False)
+    assert len(cut_blank_tail.records) == 1  # Only white space after the break: no partial row
+
     no_header = parse_model_tsv(_tsv(good))
     assert not no_header.header_ok and no_header.records[0]["verbatimTraitValue"] == "1.5"
 

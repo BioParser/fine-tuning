@@ -99,23 +99,45 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
         return [json.loads(line) for line in fh if line.strip()]
 
 
+def score_output(output: str, gold_tsv: str, *, complete: bool = True) -> dict[str, Any]:
+    """Counts for one generated TSV table and the gold TSV table of the same article."""
+    parsed = parse_model_tsv(output, complete=complete)
+    doc = score_document(parsed.records, parse_model_tsv(gold_tsv).records)
+    doc["complete"] = complete
+    doc["parse_warnings"] = len(parsed.warnings)
+    return doc
+
+
 def evaluate_files(dataset: Path, predictions: Path) -> dict[str, Any]:
+    """Score the predictions of a dataset split.
+
+    An article without a prediction counts as an empty table. If the code ignored it, a run that
+    stopped early would get a better score. Raises ValueError if no prediction id is in the dataset.
+    """
     gold = {ex["id"]: ex for ex in _read_jsonl(dataset)}
-    docs, per_doc = [], {}
+    preds: dict[str, dict[str, Any]] = {}
+    unknown: set[str] = set()
+    duplicates: set[str] = set()
     for pred in _read_jsonl(predictions):
-        ex = gold.get(pred["id"])
-        if ex is None:
-            continue
-        gold_records = parse_model_tsv(ex["messages"][-1]["content"]).records
-        parsed = parse_model_tsv(pred["output"], complete=pred.get("complete", True))
-        doc = score_document(parsed.records, gold_records)
-        doc["complete"] = pred.get("complete", True)
-        doc["parse_warnings"] = len(parsed.warnings)
-        docs.append(doc)
-        per_doc[pred["id"]] = doc
-    summary = aggregate(docs)
-    summary["missing_predictions"] = sorted(set(gold) - set(per_doc))
-    summary["incomplete_generations"] = sum(not d["complete"] for d in docs)
+        if pred["id"] not in gold:
+            unknown.add(pred["id"])
+        elif pred["id"] in preds:
+            duplicates.add(pred["id"])
+        preds[pred["id"]] = pred  # The last line wins, for example after a second run appended to the file
+    if not gold.keys() & preds.keys():
+        # Without this check, aggregate() gives the score 1.0 for 0 documents
+        raise ValueError(f"no prediction id in {predictions} is in {dataset}: examine the two files")
+    per_doc = {}
+    for ex_id, ex in gold.items():
+        pred = preds.get(ex_id, {"output": "", "complete": True})
+        per_doc[ex_id] = score_output(
+            pred["output"], ex["messages"][-1]["content"], complete=pred.get("complete", True)
+        )
+    summary = aggregate(list(per_doc.values()))
+    summary["missing_predictions"] = sorted(gold.keys() - preds.keys())
+    summary["unknown_predictions"] = sorted(unknown)
+    summary["duplicate_predictions"] = sorted(duplicates)
+    summary["incomplete_generations"] = sum(not d["complete"] for d in per_doc.values())
     return {"summary": summary, "documents": per_doc}
 
 
@@ -125,7 +147,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     ap.add_argument("--predictions", type=Path, required=True, help="JSONL from bioparser-predict")
     ap.add_argument("--out", type=Path, help="write the full report as JSON")
     args = ap.parse_args(argv)
-    report = evaluate_files(args.dataset, args.predictions)
+    try:
+        report = evaluate_files(args.dataset, args.predictions)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     print(json.dumps(report["summary"], indent=2))
     if args.out:
         args.out.write_text(json.dumps(report, indent=2), encoding="utf-8")

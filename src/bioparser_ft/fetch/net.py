@@ -135,7 +135,9 @@ class PoliteClient:
 
     # ------------------------------------------------------------------ rate limits
     def delay_for(self, host: str) -> float:
-        base = min(HOST_DELAYS[host], self.delay) if host in HOST_DELAYS else self.delay
+        # An API host always uses its own value. With min(HOST_DELAYS[host], delay), a small --delay
+        # also made the APIs faster, for example 10 requests each second to Semantic Scholar.
+        base = HOST_DELAYS.get(host, self.delay)
         return max(base, self._server_delay.get(host, 0.0))
 
     def _before_request(self, request: httpx.Request) -> None:

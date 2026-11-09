@@ -20,12 +20,16 @@ import csv
 import difflib
 import unicodedata
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
 MAX_MARKDOWN_BYTES = 32 * 1024 * 1024
 MARKDOWN_SUFFIXES = frozenset({".md", ".markdown", ".txt"})
 MINERU_ZIP_MEMBER = "markdown.md"  # verified for mineru-kit 4.1.6 --format zip
+# A damaged zip file gives one of these errors: a bad CRC, damaged compressed data, a missing
+# member, an encrypted member or an unknown compression method.
+ZIP_ERRORS = (zipfile.BadZipFile, zlib.error, EOFError, KeyError, RuntimeError, NotImplementedError)
 
 _DASHES = dict.fromkeys(map(ord, "‐‑‒–—―−"), "-")
 _QUOTES = {ord("‘"): "'", ord("’"): "'", ord("“"): '"', ord("”"): '"'}
@@ -51,13 +55,17 @@ class MarkdownSource:
         return paper_key(stem)
 
     def read_text(self, max_bytes: int = MAX_MARKDOWN_BYTES) -> str:
+        """Return the text. Raises OSError or ValueError if the file is too large or damaged."""
         if self.member is None:
             if self.path.stat().st_size > max_bytes:
                 raise ValueError(f"{self.path.name}: larger than {max_bytes} bytes")
             data = self.path.read_bytes()
         else:
-            with zipfile.ZipFile(self.path) as zf, zf.open(self.member) as fh:
-                data = fh.read(max_bytes + 1)  # never trust the declared size
+            try:
+                with zipfile.ZipFile(self.path) as zf, zf.open(self.member) as fh:
+                    data = fh.read(max_bytes + 1)  # never trust the declared size
+            except ZIP_ERRORS as exc:
+                raise ValueError(f"{self.path.name}:{self.member}: damaged zip file ({exc})") from exc
             if len(data) > max_bytes:
                 raise ValueError(f"{self.path.name}:{self.member}: larger than {max_bytes} bytes")
         return data.decode("utf-8", errors="replace")

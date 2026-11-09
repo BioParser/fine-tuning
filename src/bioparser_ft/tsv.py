@@ -187,8 +187,9 @@ REPETITION_WARN_RUN = 25  # identical consecutive rows usually mean a degenerate
 def parse_model_tsv(text: str, columns: Sequence[str] = MODEL_COLUMNS, *, complete: bool = True) -> ParsedTsv:
     """Parse model output into records with ``columns`` keys; never raises on bad output.
 
-    ``complete=False`` means generation stopped at max_new_tokens (no EOS), so the
-    last line is probably cut mid-row and is dropped. Repairs are reported in
+    ``complete=False`` means generation stopped at max_new_tokens (no EOS). Then the text
+    after the last line break is a partial row, and the parser drops it. If the cut is
+    directly after a line break, all rows are full and the parser keeps them. Repairs are reported in
     ``warnings``: missing header, header in another order (mapped by name), rows with
     the wrong number of cells (padded/truncated), code fences, think blocks.
     """
@@ -198,12 +199,16 @@ def parse_model_tsv(text: str, columns: Sequence[str] = MODEL_COLUMNS, *, comple
         warnings.append("unterminated <think> block; text after it ignored")
         text = text.split("<think>", 1)[0]
     lines = [ln.rstrip("\r") for ln in text.split("\n")]
+    after_last_break = lines[-1]  # The text after the last line break. It is "" if the cut is after a row.
     if any(_FENCE.match(ln) for ln in lines):
         warnings.append("code fences removed")
     lines = [ln for ln in lines if ln.strip() and not _FENCE.match(ln)]
-    if not complete and lines:
-        lines.pop()
-        warnings.append("generation hit max_new_tokens; dropped the last (partial) row")
+    if not complete:
+        if after_last_break.strip() and not _FENCE.match(after_last_break):
+            lines.pop()  # This line is the last item of `lines`, because the filter keeps it
+            warnings.append("generation hit max_new_tokens; dropped the last (partial) row")
+        else:
+            warnings.append("generation hit max_new_tokens after a full row; the next rows are not there")
 
     expected = list(columns)
     names = expected
