@@ -14,6 +14,10 @@ is not recommended for Qwen3.5, so the base stays 16-bit.
 More than one GPU: --num-gpus 2 starts one training process for each GPU with torchrun
 (data parallel, see distributed.py). The effective batch and the number of optimizer steps
 are the same as with 1 GPU. Only the first process writes the files.
+
+Metrics: after each epoch, the model writes the tables of the validation articles, and
+callbacks.ExtractionMetricsCallback logs precision, F1, accuracy and exact match
+(evaluate.py). The best checkpoint is the one with the best --best-metric (default cell_f1).
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ import os
 import re
 import sys
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -39,6 +43,7 @@ from .chat import (
     check_prompt,
     prepare_training_texts,
 )
+from .evaluate import SCALAR_METRICS, gold_tsv
 from .schema import MODEL_COLUMNS, PROMPT_VERSION
 
 # Qwen3.5 = 3 Gated-DeltaNet (linear attention) layers per full-attention layer. The
@@ -87,6 +92,11 @@ class TrainConfig:
     seed: int = 3407
     tiled_mlp: bool = True  # False if enough compute
     eval: bool = True
+    # Validation articles that the model writes a table for after each epoch, for the extraction
+    # metrics. None: all the articles that are not longer than max_seq_length. 0: no generation.
+    eval_docs: int | None = None
+    eval_max_new_tokens: int = 8192  # The same budget as bioparser-predict
+    best_metric: str = "cell_f1"  # A key of evaluate.scalar_metrics(), or "loss" for eval_loss
     num_gpus: int = 1  # Data parallel; more than 1 needs torchrun (bioparser-train --num-gpus)
     resume: bool = False  # continue from the last checkpoint in output_dir/checkpoints
     merge_16bit: bool = False
@@ -97,6 +107,12 @@ class TrainConfig:
         if not 0.0 <= self.warmup_fraction < 1.0:
             raise ValueError(f"warmup_fraction must be in [0, 1), not {self.warmup_fraction}")
         distributed.per_device_grad_accum(self.grad_accum, self.num_gpus)  # Raises if not a multiple
+        if self.best_metric not in ("loss", *SCALAR_METRICS):
+            raise ValueError(
+                f"best_metric must be 'loss' or one of {SCALAR_METRICS}, not {self.best_metric!r}"
+            )
+        if self.eval_docs is not None and self.eval_docs < 0:
+            raise ValueError(f"eval_docs must be 0 or more, not {self.eval_docs}")
 
 
 def _info(message: str) -> None:
@@ -190,12 +206,27 @@ def build_trainer(
     processor: Any,
     train_rows: list[dict[str, Any]],
     val_rows: list[dict[str, Any]],
+    eval_examples: Sequence[Mapping[str, Any]] = (),
 ) -> Any:
-    from unsloth.chat_templates import train_on_responses_only  # noqa: I001 - unsloth must patch trl first
+    """Build the SFTTrainer.
+
+    eval_examples are dataset rows with messages, normally the validation split. The callback writes
+    a table for each of them that is also in val_rows (not too long), and calculates the metrics.
+    """
+    from unsloth import FastLanguageModel  # noqa: I001 - unsloth must patch trl first
+    from unsloth.chat_templates import train_on_responses_only
     from datasets import Dataset
     from trl import SFTConfig, SFTTrainer
 
     has_eval = cfg.eval and bool(val_rows)
+    kept = {r["id"] for r in val_rows}
+    gen_examples = [ex for ex in eval_examples if ex["id"] in kept and gold_tsv(ex) is not None]
+    gen_examples = gen_examples[: cfg.eval_docs]  # None gives all
+    best_metric = cfg.best_metric if gen_examples else "loss"
+    if has_eval:
+        _info(
+            f"validation: {len(gen_examples)} articles for the extraction metrics; best checkpoint: {best_metric}"
+        )
     args = SFTConfig(
         output_dir=str(cfg.output_dir / "checkpoints"),
         dataset_text_field="text",
@@ -219,8 +250,8 @@ def build_trainer(
         save_strategy="epoch",
         save_total_limit=2,
         load_best_model_at_end=has_eval,
-        metric_for_best_model="eval_loss" if has_eval else None,
-        greater_is_better=False if has_eval else None,
+        metric_for_best_model=f"eval_{best_metric}" if has_eval else None,
+        greater_is_better=not best_metric.endswith("loss") if has_eval else None,
         seed=cfg.seed,
         report_to="none",
         **cfg.extra,
@@ -234,7 +265,22 @@ def build_trainer(
     )
     # Loss only on the assistant TSV. Without this the loss is dominated by
     # reproducing the paper text (thousands of prompt tokens per example).
-    return train_on_responses_only(trainer, instruction_part=INSTRUCTION_PART, response_part=RESPONSE_PART)
+    trainer = train_on_responses_only(trainer, instruction_part=INSTRUCTION_PART, response_part=RESPONSE_PART)
+    if has_eval and gen_examples:
+        from .callbacks import ExtractionMetricsCallback
+
+        trainer.add_callback(
+            ExtractionMetricsCallback(
+                trainer,
+                processor,
+                gen_examples,
+                max_new_tokens=cfg.eval_max_new_tokens,
+                max_seq_length=cfg.max_seq_length,
+                for_inference=FastLanguageModel.for_inference,
+                for_training=FastLanguageModel.for_training,
+            )
+        )
+    return trainer
 
 
 def push_private(folder: Path, repo_id: str) -> None:
@@ -288,7 +334,7 @@ def run(cfg: TrainConfig) -> Path:
     if not train_rows:
         raise SystemExit("every training example is longer than max_seq_length")
 
-    trainer = build_trainer(cfg, model, processor, train_rows, val_rows)
+    trainer = build_trainer(cfg, model, processor, train_rows, val_rows, eval_examples=val_raw)
     if problems := check_label_masking(trainer.train_dataset, processor):
         raise SystemExit(f"label masking problems: {problems}")
 
@@ -300,7 +346,9 @@ def run(cfg: TrainConfig) -> Path:
         print(f"{gpu}peak reserved VRAM: {torch.cuda.max_memory_reserved() / 2**30:.2f} GiB", flush=True)
     adapter_dir = cfg.output_dir / "lora_adapter"
     if trainer.is_world_process_zero():  # The other processes have the same weights: they write nothing
-        save_artifacts(cfg, model, processor, train_rows, val_rows, dropped + val_dropped, stats.metrics)
+        save_artifacts(
+            cfg, model, processor, train_rows, val_rows, dropped + val_dropped, stats.metrics, trainer.state
+        )
     distributed.destroy_process_group()
     return adapter_dir
 
@@ -313,8 +361,12 @@ def save_artifacts(
     val_rows: list[dict[str, Any]],
     dropped: list[tuple[str, int]],
     metrics: dict[str, Any],
+    trainer_state: Any = None,
 ) -> Path:
-    """Save adapter + processor + provenance (prompt version, dataset hashes, ids)."""
+    """Save adapter + processor + provenance (prompt version, dataset hashes, ids, metrics).
+
+    trainer_state (trainer.state) adds the validation metrics of each epoch and the best checkpoint.
+    """
     adapter_dir = cfg.output_dir / "lora_adapter"
     model.save_pretrained(str(adapter_dir))
     processor.save_pretrained(str(adapter_dir))
@@ -331,6 +383,12 @@ def save_artifacts(
         "dropped_too_long": dropped,
         "dataset_sha256": {s: _sha256(cfg.dataset_dir / f"{s}.jsonl") for s in ("train", "val", "test")},
         "train_metrics": metrics,
+        "eval_history": [
+            entry
+            for entry in getattr(trainer_state, "log_history", [])
+            if any(key.startswith("eval_") for key in entry)
+        ],
+        "best_model_checkpoint": getattr(trainer_state, "best_model_checkpoint", None),
     }
     (adapter_dir / "bioparser_ft.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     print(f"adapter saved to {adapter_dir}")
@@ -386,6 +444,26 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     ap.add_argument("--no-eval", action="store_true")
     ap.add_argument(
+        "--eval-docs",
+        type=int,
+        metavar="N",
+        help="the number of validation articles that the model writes a table for after each epoch, for "
+        "the extraction metrics. Default: all. 0: no generation, only eval_loss.",
+    )
+    ap.add_argument(
+        "--eval-max-new-tokens",
+        type=int,
+        default=d.eval_max_new_tokens,
+        help="the maximum number of tokens for each generated table after each epoch",
+    )
+    ap.add_argument(
+        "--best-metric",
+        choices=("loss", *SCALAR_METRICS),
+        default=d.best_metric,
+        help="the validation metric that selects the best checkpoint at the end. With --eval-docs 0, "
+        "the command uses loss.",
+    )
+    ap.add_argument(
         "--resume",
         action="store_true",
         help="continue an interrupted training from the last checkpoint in OUTPUT_DIR/checkpoints",
@@ -419,6 +497,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             seed=a.seed,
             tiled_mlp=a.tiled_mlp,
             eval=not a.no_eval,
+            eval_docs=a.eval_docs,
+            eval_max_new_tokens=a.eval_max_new_tokens,
+            best_metric=a.best_metric,
             num_gpus=processes,
             resume=a.resume,
             merge_16bit=a.merge_16bit,
