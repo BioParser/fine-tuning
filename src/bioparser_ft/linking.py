@@ -26,7 +26,7 @@ from pathlib import Path
 
 MAX_MARKDOWN_BYTES = 32 * 1024 * 1024
 MARKDOWN_SUFFIXES = frozenset({".md", ".markdown", ".txt"})
-MINERU_ZIP_MEMBER = "markdown.md"  # verified for mineru-kit 4.1.6 --format zip
+MINERU_ZIP_MEMBER = "markdown.md"  # verified for mineru-kit 4.1.6 and 4.2.3 --format zip
 # A damaged zip file gives one of these errors: a bad CRC, damaged compressed data, a missing
 # member, an encrypted member or an unknown compression method.
 ZIP_ERRORS = (zipfile.BadZipFile, zlib.error, EOFError, KeyError, RuntimeError, NotImplementedError)

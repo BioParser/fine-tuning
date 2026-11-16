@@ -36,7 +36,7 @@ uv run unsloth install-kernels causal_conv1d
 uv run playwright install chromium
 
 # Download the MinerU models for scripts/parse_pdfs.sh.
-uvx --from "mineru==4.1.6" mineru-models-download --tier basic
+uvx --from "mineru==4.2.3" mineru-models-download --tier basic
 ```
 
 **NOTE:** `uv sync` removes `causal_conv1d`, because `uv.lock` does not contain it. After each
@@ -88,7 +88,7 @@ uv run bioparser-evaluate --dataset data/processed/test.jsonl --predictions outp
 | Step | Result | Examine | More information |
 |---|---|---|---|
 | 1 | `fine_tuning_data/pdfs/`, `pdf_sources.tsv` and `manifest.tsv` | The papers without a PDF file | [Step 1](fine_tuning_data/README.md#step-1-get-the-pdf-files) |
-| 2 | `fine_tuning_data/parsed/*.zip` | The error messages of MinerU | [Step 2](fine_tuning_data/README.md#step-2-parse-the-pdf-files) |
+| 2 | `fine_tuning_data/parsed/*.zip` | The `Batch finished` line and the error messages of MinerU | [Step 2](fine_tuning_data/README.md#step-2-parse-the-pdf-files) |
 | 3 | `data/processed/train.jsonl`, `val.jsonl`, `test.jsonl` and `build_report.json` | The pairs that the command did not use | [Step 3](fine_tuning_data/README.md#step-3-make-the-dataset) |
 | 4 | `outputs/qwen3.5-0.8b-ets/lora_adapter/` | The training loss and the eval loss | [Training](#training) |
 | 5 | `outputs/preds_test.jsonl` and the scores | The precision, the F1 score and the accuracy for rows, cells and values, and the exact match | [Metrics](#metrics) |
