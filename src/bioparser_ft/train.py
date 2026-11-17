@@ -44,6 +44,7 @@ from .chat import (
     prepare_training_texts,
 )
 from .evaluate import SCALAR_METRICS, gold_tsv
+from .infer import use_memory_efficient_attention
 from .schema import MODEL_COLUMNS, PROMPT_VERSION
 
 # Qwen3.5 = 3 Gated-DeltaNet (linear attention) layers per full-attention layer. The
@@ -197,6 +198,8 @@ def load_model(cfg: TrainConfig) -> tuple[Any, Any]:
         use_gradient_checkpointing="unsloth",
         random_state=cfg.seed,
     )
+    if use_memory_efficient_attention():
+        _info("No FlashAttention on this GPU: the attention uses the memory-efficient kernel")
     return model, processor
 
 

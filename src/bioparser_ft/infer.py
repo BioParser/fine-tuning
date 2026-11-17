@@ -90,6 +90,27 @@ def check_base_model(model: Any, model_path: str | Path) -> bool:
     return True
 
 
+def use_memory_efficient_attention() -> bool:
+    """On a GPU without FlashAttention, make the attention memory linear in the sequence length.
+
+    The full-attention layers of Qwen3.5 have 8 query heads and 2 key/value heads. transformers
+    then calls scaled_dot_product_attention with enable_gqa=True, and PyTorch can only use the
+    FlashAttention kernel or the math kernel for it. A GPU with compute capability below 8.0 (RTX
+    20xx, T4) has no FlashAttention, so the math kernel stores the full attention matrix: 1.6 GiB for
+    one layer at 8,192 tokens in float32, which stopped the training on an RTX 2060 with 6 GB. When
+    transformers copies the key/value heads first, PyTorch uses the memory-efficient kernel (0.6 GiB
+    at 8,192 tokens and 2.4 GiB at 32,768 tokens, with the backward pass). The result is the same.
+    Returns True if the change was made.
+    """
+    import torch
+    from transformers.integrations import sdpa_attention
+
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] >= 8:
+        return False
+    sdpa_attention.use_gqa_in_sdpa = lambda *args, **kwargs: False
+    return True
+
+
 def load_for_inference(model_path: str | Path, *, max_seq_length: int = 32768) -> tuple[Any, Any]:
     """Load base + adapter exactly as trained: 16-bit LoRA, NOT 4-bit.
 
@@ -102,6 +123,7 @@ def load_for_inference(model_path: str | Path, *, max_seq_length: int = 32768) -
     model, processor = FastLanguageModel.from_pretrained(
         model_name=str(model_path), max_seq_length=max_seq_length, load_in_4bit=False
     )
+    use_memory_efficient_attention()
     check_base_model(model, model_path)
     FastLanguageModel.for_inference(model)
     return model, processor

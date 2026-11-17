@@ -124,6 +124,10 @@ For all options, run `uv run bioparser-train --help`.
 GPU memory:
 
 - GPUs without bf16, for example the RTX 20xx and the T4, train Qwen3.5 in float32.
+- GPUs without FlashAttention (compute capability below 8.0, for example the RTX 20xx and the T4)
+  use the memory-efficient attention kernel of PyTorch. Without this change, the attention of one
+  example with 8,192 tokens did not fit in the 6 GB of an RTX 2060. Training and inference make
+  the change automatically (`infer.use_memory_efficient_attention`).
 - When the VRAM is too small, Unsloth moves data to the CPU RAM. The training command sets these
   options.
 - The command removes the examples that are longer than `--max-seq-length`. It does not cut an
