@@ -186,6 +186,20 @@ def test_prepare_training_texts_drops_not_truncates() -> None:
     assert [r["id"] for r in kept] == ["short"] and dropped[0][0] == "long"
 
 
+def test_prepare_training_texts_with_an_empty_split() -> None:
+    """A real tokenizer raises IndexError for an empty batch, for example an empty val split."""
+
+    class NoEmptyBatch(StubTokenizer):
+        def __call__(
+            self, texts: Sequence[str], add_special_tokens: bool = False
+        ) -> dict[str, list[list[str]]]:
+            if not texts:
+                raise IndexError("list index out of range")
+            return super().__call__(texts, add_special_tokens)
+
+    assert prepare_training_texts(StubProcessor(NoEmptyBatch()), [], max_seq_length=2000) == ([], [])
+
+
 def test_render_with_real_transformers_template() -> None:
     """Runs where transformers is installed (the training env): real apply_chat_template."""
     pytest.importorskip("tokenizers")

@@ -73,6 +73,8 @@ def render_training_text(processing_class: Any, messages: Sequence[Message]) -> 
 
 
 def count_tokens(processing_class: Any, texts: Sequence[str]) -> list[int]:
+    if not texts:  # The tokenizer raises IndexError for an empty batch, for example an empty val split
+        return []
     tok = text_tokenizer(processing_class)
     return [len(ids) for ids in tok(list(texts), add_special_tokens=False)["input_ids"]]
 
