@@ -4,7 +4,14 @@ from pathlib import Path
 
 from conftest import CITATION_A, paper_a_rows, write_ets
 
-from bioparser_ft.schema import DOCUMENT_COLUMNS, MODEL_COLUMNS, MODEL_HEADER
+from bioparser_ft.schema import (
+    DITTO,
+    DITTO_COLUMNS,
+    DOCUMENT_COLUMNS,
+    MODEL_COLUMNS,
+    MODEL_HEADER,
+    NUMBER_COLUMNS,
+)
 from bioparser_ft.tsv import normalize_cell, parse_model_tsv, read_ets_tsv, to_ets_tsv, to_model_tsv
 
 
@@ -49,6 +56,28 @@ def test_round_trip(tmp_path: Path) -> None:
     parsed = parse_model_tsv(to_model_tsv(records))
     assert parsed.header_ok and not parsed.warnings and parsed.malformed_rows == 0
     assert parsed.records == [{c: r[c] for c in MODEL_COLUMNS} for r in records]
+
+
+def test_ditto_marks_repeated_text_cells(tmp_path: Path) -> None:
+    """Paper A rows 1 and 2 have the same name, locality and source as the row above."""
+    records = read_ets_tsv(write_ets(tmp_path / "a.tsv", paper_a_rows())).records
+    rows = [
+        dict(zip(MODEL_COLUMNS, line.split("\t"), strict=True))
+        for line in to_model_tsv(records).split("\n")[1:]
+    ]
+    assert rows[1]["verbatimScientificName"] == DITTO and rows[1]["verbatimLocality"] == DITTO
+    assert rows[1]["taxonRank"] == DITTO and rows[1]["individualCount"] == "12"  # a number is never DITTO
+    assert rows[2]["verbatimScientificName"] == "Myotis cf. muricola"  # a new value
+    assert rows[2]["associatedReferences"] == "Original study"  # the row above has another value
+    assert all(r["references"] != DITTO for r in rows)
+    assert set(DITTO_COLUMNS).isdisjoint(NUMBER_COLUMNS) and "references" not in DITTO_COLUMNS
+
+
+def test_ditto_without_a_cell_above() -> None:
+    text = "\n".join([MODEL_HEADER, "\t".join(DITTO if c in DITTO_COLUMNS else "" for c in MODEL_COLUMNS)])
+    parsed = parse_model_tsv(text)
+    assert all(v == "" for v in parsed.records[0].values())
+    assert any("no cell above" in w for w in parsed.warnings)
 
 
 def test_ets_export_has_all_columns(tmp_path: Path) -> None:

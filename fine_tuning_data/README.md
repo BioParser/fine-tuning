@@ -282,24 +282,49 @@ The builder makes a pair from `ETS_<name>.tsv` and `<name>.zip`, `<name>.md` or
 `<name>/markdown.md`. Upper case and lower case, Unicode dash types and repeated spaces do not
 change the result.
 
-For other names, add a row to `manifest.tsv`. The builder uses this file automatically. This
-file is **tab-separated**, because the file names contain commas:
+One article can have more TSV files, for example `Abraham et al., 2022` and
+`Abraham et al., 2022 part 2`. A TSV file without its own parsed file joins the article whose TSV
+files have the same `references` value. The report shows these files in `joined_by_citation`.
+Two parsed files with the same text are one article (one PDF under two names), for example
+`Froidevaux et al., 2023 - 02` and `Jérémy et al., 2023_02`. The report shows them in `same_text`.
+
+For TSV files with other names and other citations, add a row to `manifest.tsv`. The builder uses
+this file automatically. This file is **tab-separated**, because the file names contain commas:
 
 ```
 tsv	markdown
 ETS_Abraham et al., 2022 part 2.tsv	Abraham et al., 2022.zip
 ```
 
-The builder merges all TSV files of one parsed PDF file into one training example. The build
-report shows the files without a pair, and it gives possible pairs. Examine each possible pair
-before you add it.
+The builder merges all TSV files of one article into one training example, with one citation:
+the citation of most rows. It removes the duplicate rows, for example the rows of a "part 2" file
+that are also in the first file. The build report shows the files without a pair, and it gives
+possible pairs with the same first author and year. Examine each possible pair before you add it.
 
 ### Coverage of the labels
 
 For each pair, the builder finds which numbers of the labels are also in the parsed text. The
 report shows this result as `value_coverage`. The builder removes the pairs below
 `--min-coverage`. The default value is 50%. Usually, these pairs have an incorrect PDF file,
-tables that the parser lost, or values from supplementary material.
+tables that the parser lost, or values from supplementary material. In an article with more TSV
+files, each file has its own check: a file with the values of an external data set does not
+remove the other files.
+
+The model can only copy a value that is in its input. For this reason, the builder also removes
+each row that has no value in the parsed text (`unsupported_rows` in the report), for example a
+value from a supplementary file. `partly_supported_rows` counts the rows with some values that are
+not in the text, for example an SD that the curator calculated from an SE. The builder keeps these
+rows: examine them in the labels. To keep all rows, use `--keep-unsupported-rows`.
+
+### Cross-validation
+
+The test split has few articles, so one article changes the scores very much. For a more reliable
+result, use cross-validation: build and train 5 times, with `--fold 0` to `--fold 4`, and use the
+mean of the test scores. Each article is in the test split one time.
+
+```bash
+uv run bioparser-build-dataset --folds 5 --fold 0 --out-dir data/processed/fold0
+```
 
 After step 3, train the model. Refer to [Training](../README.md#training) in the root README.
 

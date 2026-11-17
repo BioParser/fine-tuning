@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import csv
 import difflib
+import re
 import unicodedata
 import zipfile
 import zlib
@@ -123,6 +124,12 @@ class LinkResult:
     warnings: list[str] = field(default_factory=list)
 
 
+def _author_and_year(key: str) -> tuple[str, str | None]:
+    """Return the first word and the year of a paper key: "abi-said et al., 2022" gives ("abi-said", "2022")."""
+    year = re.search(r"(?<!\d)(?:1[5-9]|20)\d\d(?!\d)", key)
+    return re.split(r"[\s,]+", key, maxsplit=1)[0], year.group(0) if year else None
+
+
 def read_manifest(path: Path) -> dict[str, str]:
     """Manifest with columns tsv, markdown (file names, not paths).
 
@@ -160,10 +167,13 @@ def link(tsv_dir: Path, markdown_dir: Path, manifest: Path | None = None) -> Lin
     for pair in grouped.values():  # "X, 2020" before "X, 2020 part 2"; "_02" before "_10"
         pair.tsv_paths.sort(key=lambda p: (len(p.stem), p.stem))
     unmatched_md = [s for k, s in sources.items() if k not in grouped]
-    # Suggest against all parsed files: a "part 2" TSV belongs to an already-matched PDF.
+    # Suggest against all parsed files: a "part 2" TSV belongs to an already-matched PDF. Only a
+    # file with the same first author and year: "chen et al., 2023" is not "benda et al., 2023".
     suggestions = {}
     for tsv in unmatched:
-        close = difflib.get_close_matches(paper_key(tsv.stem), list(sources), n=1, cutoff=0.8)
+        key = paper_key(tsv.stem)
+        candidates = [k for k in sources if _author_and_year(k) == _author_and_year(key)]
+        close = difflib.get_close_matches(key, candidates, n=1, cutoff=0.8)
         if close:
             suggestions[tsv.name] = sources[close[0]].path.name
     return LinkResult(

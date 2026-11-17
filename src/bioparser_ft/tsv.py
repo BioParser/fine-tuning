@@ -24,6 +24,8 @@ from pathlib import Path
 
 from .schema import (
     CANONICAL_VALUES,
+    DITTO,
+    DITTO_COLUMNS,
     DOCUMENT_COLUMNS,
     ETS_COLUMNS,
     LIST_SEPARATOR,
@@ -144,22 +146,29 @@ def to_model_tsv(records: Sequence[Mapping[str, str]], columns: Sequence[str] = 
     """Serialise records as the training target: header + one line per record.
 
     Document-level columns (``references``) are written only when they change, i.e.
-    normally on the first data row; ``parse_model_tsv`` forward-fills them. No
-    trailing newline: the training text ends with the EOS token directly after the
-    last cell (TRL appends EOS only when the text does not already end with it).
+    normally on the first data row; ``parse_model_tsv`` forward-fills them. A cell of
+    DITTO_COLUMNS that is equal to the cell above is written as DITTO; ``parse_model_tsv``
+    gives it the value of the cell above again. No trailing newline: the training text
+    ends with the EOS token directly after the last cell (TRL appends EOS only when the
+    text does not already end with it).
     """
     lines = ["\t".join(columns)]
-    last: dict[str, str] = {}
+    last: dict[str, str] = {}  # The last non-empty value of each document column
+    above: dict[str, str] = {}  # The values of the row above
     for rec in records:
         cells = []
         for col in columns:
             value = normalize_cell(rec.get(col, ""))
+            cell = value
             if col in DOCUMENT_COLUMNS:
                 if value and value == last.get(col):
-                    value = ""  # same as the row above -> "ditto"
+                    cell = ""  # same as the row above -> "ditto"
                 elif value:
                     last[col] = value
-            cells.append(value)
+            elif col in DITTO_COLUMNS and value and value == above.get(col):
+                cell = DITTO
+            above[col] = value
+            cells.append(cell)
         lines.append("\t".join(cells))
     return "\n".join(lines)
 
@@ -251,6 +260,8 @@ def parse_model_tsv(text: str, columns: Sequence[str] = MODEL_COLUMNS, *, comple
         records.append(rec)
 
     last: dict[str, str] = {}
+    above: dict[str, str] = {}
+    first_row_dittos = 0
     for rec in records:  # forward-fill "ditto" cells of document-level columns
         for col in DOCUMENT_COLUMNS:
             if col not in rec:
@@ -259,4 +270,12 @@ def parse_model_tsv(text: str, columns: Sequence[str] = MODEL_COLUMNS, *, comple
                 last[col] = rec[col]
             elif col in last:
                 rec[col] = last[col]
+        for col in DITTO_COLUMNS:  # DITTO: the value of the cell above
+            if rec.get(col) == DITTO:
+                if col not in above:
+                    first_row_dittos += 1
+                rec[col] = above.get(col, "")
+            above[col] = rec.get(col, "")
+    if first_row_dittos:
+        warnings.append(f"{first_row_dittos} {DITTO} cells in the first row have no cell above; left empty")
     return ParsedTsv(records=records, warnings=warnings, header_ok=header_ok, malformed_rows=malformed)

@@ -14,7 +14,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from types import MappingProxyType
 
-PROMPT_VERSION = "ets-tsv-v1"
+# v2: clean_markdown removes the references and the back matter, and joins the digits in formulas.
+# The model writes DITTO for a text cell that repeats the cell above.
+PROMPT_VERSION = "ets-tsv-v2"
 
 # Column order of the client's ETS TSV exports (identical header in all delivered files).
 ETS_COLUMNS: tuple[str, ...] = (
@@ -53,6 +55,22 @@ DOCUMENT_COLUMNS: tuple[str, ...] = ("references",)
 
 # What the model emits: header line + one line per record, in this order.
 MODEL_COLUMNS: tuple[str, ...] = tuple(c for c in ETS_COLUMNS if c not in CONSTANT_COLUMNS)
+
+# The columns with numbers. The model writes each number in full, also when it repeats.
+NUMBER_COLUMNS: tuple[str, ...] = (
+    "individualCount",
+    "measurementValue_min",
+    "measurementValue_max",
+    "dispersion",
+    "verbatimTraitValue",
+)
+# In the other columns, a cell with only DITTO has the value of the cell above. 42% of the tokens
+# of the delivered tables repeat the cell above (name, trait, unit, locality, method, source): the
+# mark makes the tables shorter, so more of them fit in the generation budget. No delivered cell is '"'.
+DITTO = '"'
+DITTO_COLUMNS: tuple[str, ...] = tuple(
+    c for c in MODEL_COLUMNS if c not in NUMBER_COLUMNS and c not in DOCUMENT_COLUMNS
+)
 
 # Separator for list values. Client cells with embedded line breaks (e.g. several
 # associatedReferences) are joined with it; Darwin Core recommends " | " for lists.
@@ -169,6 +187,8 @@ def _build_system_prompt() -> str:
         "(e.g. per sex, life stage or locality as reported).\n"
         "- Separate cells with one TAB. Never put a TAB or line break inside a cell. "
         "Leave a cell empty when the article does not state it.\n"
+        f"- When a cell has the same value as the cell above, write only {DITTO} in it. Not in the "
+        f"columns {', '.join(NUMBER_COLUMNS)}: write each number in full.\n"
         "- Output only the TSV: no Markdown, no code fences, no comments.\n"
         "\n"
         "Columns:\n"
