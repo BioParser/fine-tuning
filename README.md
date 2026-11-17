@@ -107,6 +107,7 @@ The command `uv run bioparser-train` trains a LoRA adapter with Unsloth. It save
 
 | Option | Default | Description |
 |---|---|---|
+| `--config FILE` | None | The profile of a computer, for example `configs/h100x8.toml`. Refer to [Profiles](#profiles). |
 | `--max-seq-length N` | 65536 | The maximum number of tokens for the prompt, the article and the TSV table |
 | `--tiled-mlp`, `--no-tiled-mlp` | On | Tiled MLP uses less GPU memory for long sequences. On a GPU with much memory, use `--no-tiled-mlp`. |
 | `--model-revision HASH` | The newest commit | The commit of the base model on Hugging Face. Use it to train on the same weights in each run. |
@@ -148,6 +149,29 @@ example `eval_cell_f1`, `eval_row_accuracy` and `eval_exact_match`.
 - With 2 GPUs, each GPU writes the tables of approximately half of the articles.
 - The token accuracy of teacher forcing is not available. It needs the full logits, and Unsloth does
   not keep them, to save memory.
+
+### Profiles
+
+A profile keeps the training settings of one computer. The folder `configs/` has these profiles:
+
+| Profile | GPUs | Model | `--max-seq-length` |
+|---|---|---|---|
+| `configs/rtx2060.toml` | 1 x RTX 2060, 6 GB | Qwen3.5-0.8B | 20480 (tested: peak 3.89 GiB) |
+| `configs/rtx3090x2.toml` | 2 x RTX 3090, 24 GB | Qwen3.5-4B | 32768 |
+| `configs/a100x8.toml` | 8 x A100, 80 GB | Qwen3.5-4B | 131072 |
+| `configs/h100x8.toml` | 8 x H100, 80 GB | Qwen3.5-4B | 131072 |
+
+```bash
+uv run bioparser-train --config configs/h100x8.toml
+```
+
+- The keys of a profile are the fields of `TrainConfig` in `src/bioparser_ft/train.py`. A key
+  with an unknown name or a value of the wrong type stops the command with an error.
+- The command-line options override the profile, for example
+  `uv run bioparser-train --config configs/h100x8.toml --epochs 2`.
+- `bioparser_ft.json` of the adapter records the profile and all the settings of the run.
+- Only the RTX 2060 profile is tested. On a new computer, examine the peak GPU memory in the log
+  of the first run, and change the profile if necessary.
 
 ### Two GPUs
 

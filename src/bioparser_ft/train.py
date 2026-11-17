@@ -29,9 +29,10 @@ import json
 import os
 import re
 import sys
+import tomllib
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import MISSING, asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -102,7 +103,8 @@ class TrainConfig:
     resume: bool = False  # continue from the last checkpoint in output_dir/checkpoints
     merge_16bit: bool = False
     push_to_hub: str | None = None  # private repo id; token from $HF_TOKEN or `hf auth login`
-    extra: dict[str, Any] = field(default_factory=dict)
+    profile: str | None = None  # The --config file of the run. bioparser_ft.json records it.
+    extra: dict[str, Any] = field(default_factory=dict)  # More SFTConfig options, for example from a profile
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.warmup_fraction < 1.0:
@@ -114,6 +116,46 @@ class TrainConfig:
             )
         if self.eval_docs is not None and self.eval_docs < 0:
             raise ValueError(f"eval_docs must be 0 or more, not {self.eval_docs}")
+
+
+# A profile value has the type of the default of its TrainConfig field. These fields have the
+# default None, so their type is here.
+_NONE_DEFAULT_TYPES: dict[str, type] = {"model_revision": str, "eval_docs": int, "push_to_hub": str}
+_PROFILE_PATHS = ("dataset_dir", "output_dir")
+_NO_PROFILE_KEYS = ("resume", "profile")  # A property of one run, not of a computer
+
+
+def read_profile(path: Path) -> dict[str, Any]:
+    """Read a training profile: a TOML file with the names of the TrainConfig fields.
+
+    configs/ has one profile for each computer, for example configs/h100x8.toml. The command-line
+    options override the values of the profile. Raises ValueError for an unknown key or a value of
+    the wrong type, so that a typing error does not silently use a default value.
+    """
+    try:
+        with path.open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"{path}: {exc}") from exc
+    known = {f.name: f for f in fields(TrainConfig)}
+    unknown = sorted((set(data) - set(known)) | (set(data) & set(_NO_PROFILE_KEYS)))
+    if unknown:
+        raise ValueError(f"{path}: these keys are not profile settings: {unknown}")
+    out: dict[str, Any] = {}
+    for key, value in data.items():
+        f = known[key]
+        default = f.default_factory() if f.default_factory is not MISSING else f.default
+        if key in _PROFILE_PATHS and isinstance(value, str):
+            value = Path(value)
+        elif key == "target_modules" and isinstance(value, list) and all(isinstance(v, str) for v in value):
+            value = tuple(value)
+        elif isinstance(default, float) and isinstance(value, int) and not isinstance(value, bool):
+            value = float(value)  # "epochs = 3" is 3.0
+        expected = _NONE_DEFAULT_TYPES[key] if default is None else type(default)
+        if isinstance(value, bool) != (expected is bool) or not isinstance(value, expected):
+            raise ValueError(f"{path}: {key} = {value!r} is not a {expected.__name__}")
+        out[key] = value
+    return out
 
 
 def _info(message: str) -> None:
@@ -299,6 +341,8 @@ def push_private(folder: Path, repo_id: str) -> None:
 
 
 def run(cfg: TrainConfig) -> Path:
+    if cfg.profile:
+        _info(f"profile: {cfg.profile} (model {cfg.model_name}, max_seq_length {cfg.max_seq_length})")
     # Cheap checks first: fail before a multi-minute model load.
     if cfg.num_gpus != distributed.world_size():
         raise SystemExit(
@@ -409,8 +453,25 @@ def save_artifacts(
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    d = TrainConfig()
+    args = list(sys.argv[1:] if argv is None else argv)
+    # The profile gives the defaults of the other options: read it first. With more than one GPU,
+    # torchrun gives the same arguments to each process, so each process reads the same profile.
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", type=Path)
+    config: Path | None = pre.parse_known_args(args)[0].config
+    try:
+        profile = read_profile(config) if config else {}
+        d = replace(TrainConfig(), **profile)
+    except ValueError as exc:
+        raise SystemExit(f"--config: {exc}") from exc
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument(
+        "--config",
+        type=Path,
+        metavar="TOML",
+        help="the training profile of a computer, for example configs/h100x8.toml. The other options "
+        "override the values of the profile.",
+    )
     ap.add_argument("--dataset-dir", type=Path, default=d.dataset_dir)
     ap.add_argument("--output-dir", type=Path, default=d.output_dir)
     ap.add_argument("--model-name", default=d.model_name)
@@ -435,6 +496,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         type=int,
         choices=range(1, 9),
         metavar="N",
+        default=profile.get("num_gpus"),
         help="the number of GPUs on this computer, for example 1 or 2 (default: 1). With more than 1, "
         "the command starts one training process for each GPU with torchrun (data parallel).",
     )
@@ -445,11 +507,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         default=d.tiled_mlp,
         help="tiled MLP: less activation memory at long context. On by default; --no-tiled-mlp turns it off",
     )
-    ap.add_argument("--no-eval", action="store_true")
+    ap.add_argument("--no-eval", action="store_true", default=not d.eval)
     ap.add_argument(
         "--eval-docs",
         type=int,
         metavar="N",
+        default=d.eval_docs,
         help="the number of validation articles that the model writes a table for after each epoch, for "
         "the extraction metrics. Default: all. 0: no generation, only eval_loss.",
     )
@@ -471,9 +534,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         action="store_true",
         help="continue an interrupted training from the last checkpoint in OUTPUT_DIR/checkpoints",
     )
-    ap.add_argument("--merge-16bit", action="store_true", help="also save merged 16-bit weights")
-    ap.add_argument("--push-to-hub", metavar="REPO_ID", help="upload adapter to a PRIVATE hub repo")
-    args = list(sys.argv[1:] if argv is None else argv)
+    ap.add_argument(
+        "--merge-16bit",
+        action=argparse.BooleanOptionalAction,
+        default=d.merge_16bit,
+        help="also save merged 16-bit weights",
+    )
+    ap.add_argument(
+        "--push-to-hub", metavar="REPO_ID", default=d.push_to_hub, help="upload adapter to a PRIVATE hub repo"
+    )
     a = ap.parse_args(args)
     processes = distributed.world_size()  # More than 1 in a process that torchrun started
     try:
@@ -486,7 +555,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     if a.num_gpus is not None and a.num_gpus != processes:
         ap.error(f"--num-gpus {a.num_gpus}, but torchrun started {processes} processes")
     run(
-        TrainConfig(
+        replace(  # The fields without an option, for example warmup_fraction, keep the profile value
+            d,
             dataset_dir=a.dataset_dir,
             output_dir=a.output_dir,
             model_name=a.model_name,
@@ -507,6 +577,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             resume=a.resume,
             merge_16bit=a.merge_16bit,
             push_to_hub=a.push_to_hub,
+            profile=str(config) if config else None,
         )
     )
 

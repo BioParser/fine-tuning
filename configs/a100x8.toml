@@ -1,0 +1,23 @@
+# Eight A100 GPUs with 80 GB each. The model is Qwen3.5-4B.
+#   uv run bioparser-train --config configs/a100x8.toml
+#
+# A100 GPUs have bf16 and FlashAttention. Each GPU has a full copy of the model (data parallel).
+# With 131,072 tokens, almost no article is too long. For A100 GPUs with 40 GB, use
+# --max-seq-length 65536.
+# Not tested yet. The log shows the peak memory of each GPU. If it is low, use --no-tiled-mlp:
+# the training is then faster.
+# torch in uv.lock is for CUDA 13.0: the NVIDIA driver must be version 580 or newer (nvidia-smi).
+
+model_name = "Qwen/Qwen3.5-4B"
+model_revision = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+output_dir = "outputs/qwen3.5-4b-ets"
+max_seq_length = 131072
+num_gpus = 8
+grad_accum = 8  # Each GPU does 1 step. The effective batch is 8 examples.
+tiled_mlp = true
+lora_r = 32
+lora_alpha = 32
+epochs = 4.0
+learning_rate = 1e-4
+eval_max_new_tokens = 32768  # Long enough for all the validation tables
+merge_16bit = true  # For vLLM
