@@ -233,6 +233,8 @@ __marimo__/
 !/fine_tuning_data/README.md
 !/fine_tuning_data/manifest.example.tsv
 *.pdf
+*.zip
+
 # model weights can reproduce client data
 /lora_model/
 /unsloth_compiled_cache/

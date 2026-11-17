@@ -38,6 +38,7 @@ MIN_TEXT_CHARS = 200  # A file with less text is a scanned document without a te
 TITLE_OK = 0.8  # The part of the title words that must be in the file, with the author or the year
 MIN_TITLE_WORDS = 4  # A shorter title is too general for a decision
 MIN_ID_CHARS = 6  # The shortest part of a DOI that can identify a file name
+TITLE_LEAD_WORDS = 8  # The first words of a title. On the first page, they are the title of the file.
 CONFIDENT_REPORT_LEVELS = ("high", "medium", "given")
 
 
@@ -62,6 +63,10 @@ class Evidence:
     title_words: int = 0
     author: bool = False
     year: bool = False
+    # The first words of the title are a phrase on the first page. The title words of a short title,
+    # for example "Cryptotis nigrescens (Eulipotyphla: Soricidae)", can be in a different article, and
+    # the references of an article contain the titles of other articles, but not on the first page.
+    title_first_page: bool = False
 
     @property
     def confident(self) -> bool:
@@ -77,11 +82,12 @@ class Evidence:
         return self.doi_in_name or self.title >= 0.4 or (self.author and self.year)
 
     @property
-    def rank(self) -> tuple[bool, bool, bool, float, bool, bool]:
+    def rank(self) -> tuple[bool, bool, bool, bool, float, bool, bool]:
         return (
             self.confident,
             self.doi_in_text,
             self.doi_in_name,
+            self.title_first_page,
             round(self.title, 2),
             self.author,
             self.year,
@@ -90,7 +96,7 @@ class Evidence:
     def describe(self) -> str:
         found = [("DOI in the text", self.doi_in_text), ("DOI in the file name", self.doi_in_name)]
         parts = [name for name, ok in found if ok]
-        parts.append(f"title {self.title:.2f}")
+        parts.append(f"title {self.title:.2f}" + (" on page 1" if self.title_first_page else ""))
         parts += [name for name, ok in (("first author", self.author), ("year", self.year)) if ok]
         return ", ".join(parts)
 
@@ -107,8 +113,8 @@ class Decision:
 
 
 # ------------------------------------------------------------------------ comparison
-def read_text(data: bytes) -> tuple[str, int]:
-    """Return the text of the first pages and the number of pages. A damaged file gives ("", 0)."""
+def read_pages(data: bytes) -> tuple[list[str], int]:
+    """Return the text of each of the first pages and the number of pages. A damaged file gives ([], 0)."""
     try:
         from pypdf import PdfReader
 
@@ -116,14 +122,26 @@ def read_text(data: bytes) -> tuple[str, int]:
         if reader.is_encrypted:
             reader.decrypt("")  # Many publisher PDF files use an empty user password
         pages = len(reader.pages)
-        text = " ".join((reader.pages[i].extract_text() or "") for i in range(min(TEXT_PAGES, pages)))
+        texts = [reader.pages[i].extract_text() or "" for i in range(min(TEXT_PAGES, pages))]
     except Exception:  # A damaged or unusual PDF file
-        return "", 0
-    return text, pages
+        return [], 0
+    return texts, pages
 
 
 def _alnum(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+_LETTER_DIGIT = re.compile(r"(?<=[a-z])(?=[0-9])|(?<=[0-9])(?=[a-z])")
+
+
+def _words(text: str) -> str:
+    """Return norm(text) with a space between a letter and a digit.
+
+    The numbers of the affiliations follow the names of the authors without a space:
+    "Quiroga-Carmona1,2,3" gives "quiroga carmona 1 2 3", not "quiroga carmona1 2 3".
+    """
+    return _LETTER_DIGIT.sub(" ", norm(text))
 
 
 def doi_in_file_name(doi: str, name: str) -> bool:
@@ -145,12 +163,24 @@ class FileText:
     compact: str  # The text in lower case and without whitespace, for the DOI
     padded: str  # The normalized words, with a space at each end, for the author and the year
     words: frozenset[str]  # The title words of the text and of the file name
+    first_page: str = ""  # The normalized words of the first page, with a space at each end
 
     @classmethod
-    def of(cls, text: str, name: str) -> Self:
+    def of(cls, text: str, name: str, first_page: str = "") -> Self:
         # Some file names contain the title, for example "Austral Ecology - 2015 - Arman - Dietary ...pdf"
         words = f"{text} {Path(name).stem.replace('_', ' ')}"
-        return cls(name, re.sub(r"\s+", "", text).lower(), f" {norm(words)} ", frozenset(tokens(words)))
+        return cls(
+            name,
+            re.sub(r"\s+", "", text).lower(),
+            f" {_words(words)} ",
+            frozenset(tokens(words)),
+            f" {_words(first_page)} ",
+        )
+
+
+def _title_on_first_page(title: str, doc: FileText) -> bool:
+    lead = _words(title).split()[:TITLE_LEAD_WORDS]
+    return len(lead) >= MIN_TITLE_WORDS and f" {' '.join(lead)} " in doc.first_page
 
 
 def evidence(target: Target, doc: FileText) -> Evidence:
@@ -165,10 +195,11 @@ def evidence(target: Target, doc: FileText) -> Evidence:
         n = len(title_tokens)
         if n and (r := sum(w in doc.words for w in title_tokens) / n, n) > (title, title_words):
             title, title_words = r, n
-    first = norm(target.paper.first_author)
+    first_page = any(_title_on_first_page(t, doc) for t in target.titles)
+    first = _words(target.paper.first_author)
     author = bool(first) and f" {first} " in doc.padded
     year = target.paper.year is not None and f" {target.paper.year} " in doc.padded
-    return Evidence(doi_in_text, doi_in_name, title, title_words, author, year)
+    return Evidence(doi_in_text, doi_in_name, title, title_words, author, year, first_page)
 
 
 def decide(path: Path, targets: Sequence[Target]) -> Decision:
@@ -176,10 +207,11 @@ def decide(path: Path, targets: Sequence[Target]) -> Decision:
     data = path.read_bytes()
     if not is_pdf(data):
         return Decision(path, "skip", reason="not a PDF file")
-    text, pages = read_text(data)
+    texts, pages = read_pages(data)
     if pages == 0:
         return Decision(path, "skip", reason="pypdf cannot read the file")
-    doc = FileText.of(text, path.name)  # One time for each file, not for each paper
+    text = " ".join(texts)
+    doc = FileText.of(text, path.name, texts[0])  # One time for each file, not for each paper
     scored = sorted(((evidence(t, doc), t) for t in targets), key=lambda s: s[0].rank, reverse=True)
     best, target = scored[0]
     second = scored[1][0] if len(scored) > 1 else Evidence()
@@ -187,7 +219,9 @@ def decide(path: Path, targets: Sequence[Target]) -> Decision:
     if not best.confident:
         guess = target if best.possible else None
         return Decision(path, "review", guess, best, scan + "no paper agrees enough", pages)
-    if second.confident and second.rank[:3] == best.rank[:3] and abs(second.title - best.title) < 0.1:
+    # Two papers agree: the same DOI evidence, the title on page 1 for both or for neither, and
+    # almost the same part of the title words
+    if second.confident and second.rank[:4] == best.rank[:4] and abs(second.title - best.title) < 0.1:
         other = scored[1][1].paper.key
         return Decision(
             path, "review", target, best, f"two papers agree: {target.paper.key} and {other}", pages
@@ -341,8 +375,8 @@ def run(args: argparse.Namespace) -> list[Decision]:
         if target is None:
             close = difflib.get_close_matches(links[path.name], [t.paper.key for t in targets], n=3)
             raise SystemExit(f"--link: no paper {links[path.name]!r}. Similar names: {close}")
-        text, pages = read_text(path.read_bytes())
-        ev = evidence(target, FileText.of(text, path.name))
+        texts, pages = read_pages(path.read_bytes())
+        ev = evidence(target, FileText.of(" ".join(texts), path.name, texts[0] if texts else ""))
         action, reason = (
             ("duplicate", f"pdfs/{target.paper.pdf_name} exists") if target.has_pdf else ("move", "")
         )

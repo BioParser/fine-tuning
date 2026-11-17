@@ -132,6 +132,55 @@ def test_similar_titles_go_to_review(tmp_path: Path) -> None:
     assert d.action == "review" and "two papers agree" in d.reason
 
 
+def test_author_with_affiliation_numbers(tmp_path: Path) -> None:
+    """The numbers of the affiliations follow the name without a space, for example "Kim1,2"."""
+    _setup(tmp_path)
+    _put(tmp_path, "shrews.pdf", TITLE_SHREWS + ". Byung Kim1,2 and Chul Lee2*" + FILLER)  # No year
+    (d,) = run(_args(tmp_path))
+    assert d.action == "move" and d.evidence.author and not d.evidence.year
+    assert d.target is not None and d.target.paper.key == "Kim and Lee, 2023"
+
+
+def _two_papers_of_one_author(tmp: Path) -> None:
+    tsv = tmp / "ets_tsv"
+    tsv.mkdir()
+    long = "Two new species of small-eared shrews of the genus Cryptotis from the Colombian Andes"
+    short = "Cryptotis nigrescens (Eulipotyphla: Soricidae)"  # A Mammalian Species account
+    cit_long = f"Woodman, N., 2023. {long}. Annals of Carnegie Museum, 88(3), pp.171-204."
+    cit_short = f"Woodman, N. and Timm, R.M., 2023. {short}. Mammalian Species, 55(1031), pp.1-12."
+    write_ets(tsv / "ETS_Woodman, 2023.tsv", [ets_row(references=cit_long)])
+    write_ets(tsv / "ETS_Woodman and Timm, 2023.tsv", [ets_row(references=cit_short)])
+    (tmp / "pdfs" / "_unverified").mkdir(parents=True)
+
+
+def test_short_title_of_another_paper(tmp_path: Path) -> None:
+    """All the words of the short title are in the file. Only the long title is a phrase on page 1."""
+    _two_papers_of_one_author(tmp_path)
+    page = (
+        "Two new species of small-eared shrews of the genus Cryptotis from the Colombian Andes. "
+        "Neal Woodman 2023. Eulipotyphla: Soricidae. We compare the new species with Cryptotis nigrescens."
+    )
+    _put(tmp_path, "cryptotis.pdf", page + FILLER)
+    (d,) = run(_args(tmp_path))
+    assert d.action == "move" and d.evidence.title_first_page
+    assert d.target is not None and d.target.paper.key == "Woodman, 2023"
+
+
+def test_cited_title_on_a_later_page(tmp_path: Path) -> None:
+    """The references on page 2 cite the other paper with its full title. That title does not count."""
+    _two_papers_of_one_author(tmp_path)
+    page1 = "Cryptotis nigrescens: Eulipotyphla: Soricidae. Neal Woodman and Robert M. Timm 2023" + FILLER
+    page2 = (
+        "References. Woodman N. 2023. Two new species of small-eared shrews of the genus Cryptotis "
+        "from the Colombian Andes. Annals of Carnegie Museum 88: 171-204."
+    )
+    (tmp_path / "pdfs" / "_unverified" / "sead011.pdf").write_bytes(make_pdf([page1, page2]))
+    (d,) = run(_args(tmp_path))
+    assert d.action == "move", d.reason
+    assert d.target is not None and d.target.paper.key == "Woodman and Timm, 2023"
+    assert d.evidence.describe() == "title 1.00 on page 1, first author, year"
+
+
 def test_scanned_pdf_goes_to_review(tmp_path: Path) -> None:
     _setup(tmp_path)
     _put(tmp_path, "gyac068.pdf", "x")  # The DOI is in the name, but the file has no text layer
