@@ -8,12 +8,15 @@
 # * MINERU_VERSION must equal the version used in production. Otherwise the model is trained
 #   on one markdown dialect and sees another at inference.
 # * Output: one <pdf-stem>.zip per PDF with markdown.md, middle_json.json,
-#   structured_content.json and images (verified for mineru-kit 4.1.6). Name PDFs like the
-#   TSVs without the "ETS_" prefix so they pair automatically.
+#   structured_content.json and images (verified for mineru-kit 4.1.6 and 4.2.3). Name PDFs like
+#   the TSVs without the "ETS_" prefix so they pair automatically.
+# * Since MinerU 4.2.2, a PDF that fails (damaged, encrypted, too large) does not stop the batch:
+#   the other PDFs are parsed, MinerU prints "Batch finished: succeeded=.. failed=..", and this
+#   script exits with an error. Older versions stopped at the first failure.
 # * Local parsing only. Do NOT add --remote: it uploads the client's PDFs to mineru.net.
 set -euo pipefail
 
-MINERU_VERSION="${MINERU_VERSION:-4.1.6}"
+MINERU_VERSION="${MINERU_VERSION:-4.2.3}"
 TIER="${TIER:-basic}" # basic = local lightweight models; standard/advanced use a VLM
 PDF_DIR="${1:-fine_tuning_data/pdfs}"
 OUT_DIR="${2:-fine_tuning_data/parsed}"

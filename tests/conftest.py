@@ -114,6 +114,31 @@ def paper_a_markdown() -> str:
     )
 
 
+def paper_a_mineru_markdown() -> str:
+    """The start of the markdown.md that MinerU 4.2.3 (mineru-kit parse --format zip --tier basic)
+    wrote for a synthetic PDF file with the table of paper A. MinerU 4.1.6 wrote the same text.
+    Different from paper_a_markdown(): a pipe table, an ASCII hyphen in the range and inline LaTeX."""
+    return (
+        "# Bats of Somewhere: morphometrics of two Myotis species\n\n"
+        "J. Doe and R. Roe\n\n"
+        "## Abstract\n\n"
+        "Myotis ater and Myotis cf. muricola were collected in Cave X, Region Y, during 2018 and 2019. "
+        "We report external and cranial measurements of adult males and compare them with published "
+        "values for the region. Body mass was measured to the nearest 0.1 g with a spring balance.\n\n"
+        "## Results\n\n"
+        "Forearm length (FA) and the ratio of the greatest length of skull to the breadth across molars "
+        "(GLS/BAM) are given in Table 1. The coefficient of variation was computed as "
+        "$\\mathsf{CV} = 100 \\times \\mathsf{SD} / \\bar{\\mathsf{x}}.$\n\n"
+        "Table 1. External measurements of the two species (mean ± SD (range), n).\n\n"
+        "| Species | FA (mm) | GLS/BAM | Mass (g) |\n"
+        "| --- | --- | --- | --- |\n"
+        "| M. ater | 37.42 ± 0.83 (36.5-39.1), n = 12 | 2.31 |  |\n"
+        "| M. cf. muricola |  |  | 5.85 |\n\n"
+        "![](images/page_0_chart_8.jpg)\n\n"
+        "Figure 1. Number of captures per survey night in Cave X."
+    )
+
+
 def paper_b_rows() -> list[list[str]]:
     return [
         ets_row(
@@ -162,10 +187,11 @@ def ets_dir(tmp_path: Path) -> Path:
 def parsed_dir(tmp_path: Path) -> Path:
     d = tmp_path / "parsed"
     d.mkdir()
-    # MinerU --format zip layout (verified for mineru-kit 4.1.6)
+    # MinerU --format zip layout (verified for mineru-kit 4.1.6 and 4.2.3)
     with zipfile.ZipFile(d / "Doe and Roe, 2020.zip", "w") as zf:
         zf.writestr("markdown.md", paper_a_markdown())
         zf.writestr("middle_json.json", "{}")
+        zf.writestr("structured_content.json", "{}")
         zf.writestr("images/page_0_image_1.jpg", b"\xff\xd8")
     (d / "Smith, 2021.md").write_text(paper_b_markdown(), encoding="utf-8")  # --format markdown
     (d / "Mislinked, 2022.md").write_text("An unrelated paper about frogs, 12.5 and 99.1.", encoding="utf-8")

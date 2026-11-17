@@ -4,11 +4,12 @@ import json
 import zipfile
 from pathlib import Path
 
-from conftest import paper_a_markdown, paper_a_rows
+from conftest import paper_a_markdown, paper_a_mineru_markdown, paper_a_rows
 
 from bioparser_ft.build_dataset import assign_split, build
 from bioparser_ft.coverage import label_coverage, numbers_in
 from bioparser_ft.linking import MarkdownSource, discover_markdown, link, paper_key
+from bioparser_ft.markdown import clean_markdown
 from bioparser_ft.schema import ETS_COLUMNS, MODEL_HEADER, SYSTEM_PROMPT
 from bioparser_ft.tsv import normalize_record, parse_model_tsv
 
@@ -57,6 +58,26 @@ def test_coverage_detects_wrong_pdf() -> None:
     assert good.value_ratio == 1.0 and good.name_ratio == 1.0
     bad = label_coverage("A paper about frogs: 12.7 and 3.3", records)
     assert bad.value_ratio == 0.0 and bad.missing_values
+
+
+def test_mineru_4_2_zip(tmp_path: Path) -> None:
+    """The members and the Markdown of a real MinerU 4.2.3 --format zip file give full coverage."""
+    parsed = tmp_path / "parsed"
+    parsed.mkdir()
+    with zipfile.ZipFile(parsed / "Doe and Roe, 2020.zip", "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("images/page_0_chart_8.jpg", b"\xff\xd8")
+        zf.writestr("images/page_0_table_7.jpg", b"\xff\xd8")
+        zf.writestr("markdown.md", paper_a_mineru_markdown())
+        zf.writestr("middle_json.json", '{"metadata": {"producer": {"name": "mineru", "version": "4.2.3"}}}')
+        zf.writestr("structured_content.json", "{}")
+    sources, warnings = discover_markdown(parsed)
+    assert not warnings
+    assert sources["doe and roe, 2020"].member == "markdown.md"
+    text = clean_markdown(sources["doe and roe, 2020"].read_text())
+    assert "![" not in text and "$\\mathsf{CV}" in text  # the image link goes, the LaTeX stays
+    records = [normalize_record(dict(zip(ETS_COLUMNS, r, strict=True))) for r in paper_a_rows()]
+    cov = label_coverage(text, records)
+    assert (cov.value_ratio, cov.name_ratio) == (1.0, 1.0)
 
 
 def test_numbers_in() -> None:

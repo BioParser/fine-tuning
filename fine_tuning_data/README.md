@@ -230,8 +230,15 @@ The script parses each PDF file in `fine_tuning_data/pdfs/` with MinerU. It writ
 for each PDF file to `fine_tuning_data/parsed/`. To use other folders, give them as arguments:
 `scripts/parse_pdfs.sh PDF_DIR OUT_DIR`.
 
+If MinerU cannot parse a PDF file, for example a damaged or encrypted file, it shows an error and
+parses the other PDF files. At the end, MinerU shows a summary, for example
+`Batch finished: succeeded=41, skipped=0, failed=1, unprocessed=0.` Then the script stops with an
+error. The zip files of the other PDF files are correct, and you can do step 3. Step 3 shows the
+TSV files of the PDF file that failed in `unmatched_tsv`. If `unprocessed` is more than 0, MinerU
+stopped before the end. Find the cause in the error messages, and then do step 2 again.
+
 MinerU operates on your computer, in a separate `uvx` environment. The variable `MINERU_VERSION`
-sets the MinerU version. The default is 4.1.6. The variable `TIER` sets the models. The default is
+sets the MinerU version. The default is 4.2.3. The variable `TIER` sets the models. The default is
 `basic`.
 
 **CAUTION:** Do not add the option `--remote` to MinerU. This option sends the client PDF files
@@ -242,12 +249,17 @@ same version and tier as production. The bioparser repository sets them in
 `docker/mineru.Dockerfile`. Compare the two repositories before you make the training data.
 
 If you change the version or the tier, download the models for them one time. Then give the
-version and the tier to the script. For example, for MinerU 4.1.6 and the tier `basic`:
+version and the tier to the script. For example, for MinerU 4.2.3 and the tier `basic`:
 
 ```bash
-uvx --from "mineru==4.1.6" mineru-models-download --tier basic
-MINERU_VERSION=4.1.6 TIER=basic scripts/parse_pdfs.sh
+uvx --from "mineru==4.2.3" mineru-models-download --tier basic
+MINERU_VERSION=4.2.3 TIER=basic scripts/parse_pdfs.sh
 ```
+
+When you change the version or the tier, delete the old files in `fine_tuning_data/parsed/`. Then
+parse all the PDF files again. If a PDF file fails, MinerU does not replace its old zip file, and
+the training data gets the Markdown of two versions. In each zip file, `middle_json.json` gives
+the version in `metadata.producer.version`.
 
 The old notebook had three manual steps. It numbered the files, it extracted `markdown.md` from
 the zip files, and it filtered the files by the page count. Now the tools do this work. The
