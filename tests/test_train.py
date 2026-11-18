@@ -95,6 +95,76 @@ def test_balanced_shards() -> None:
     assert distributed.balanced_shards([], 2) == [[], []]
 
 
+CONFIGS = Path(__file__).resolve().parents[1] / "configs"
+
+
+@pytest.mark.parametrize("path", sorted(CONFIGS.glob("*.toml")), ids=lambda p: p.name)
+def test_the_profiles_in_configs_are_valid(path: Path) -> None:
+    profile = train.read_profile(path)
+    cfg = TrainConfig(**profile)  # TrainConfig checks the values, for example --grad-accum and the GPUs
+    assert cfg.model_revision and len(cfg.model_revision) == 40  # The same base weights in each run
+    assert "4b" in str(cfg.output_dir).lower() or "4B" not in cfg.model_name  # No mix of model outputs
+
+
+def test_read_profile_refuses_errors(tmp_path: Path) -> None:
+    p = tmp_path / "x.toml"
+    p.write_text("epochs = 3\nmax_seq_length = 4096\nextra = {group_by_length = true}\n", encoding="utf-8")
+    assert train.read_profile(p) == {
+        "epochs": 3.0,
+        "max_seq_length": 4096,
+        "extra": {"group_by_length": True},
+    }
+    for text, message in [
+        ("epoch = 3", "not profile settings"),  # A typing error must not use the default silently
+        ("resume = true", "not profile settings"),  # A property of one run
+        ('max_seq_length = "4096"', "is not a int"),
+        ("tiled_mlp = 1", "is not a bool"),
+        ("lora_r = true", "is not a int"),
+        ("max_seq_length = ", "x.toml"),  # Not TOML
+    ]:
+        p.write_text(text + "\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=message):
+            train.read_profile(p)
+
+
+def test_main_uses_the_profile_and_the_options_override_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    p = tmp_path / "gpu.toml"
+    p.write_text(
+        'model_name = "Qwen/Qwen3.5-4B"\nmax_seq_length = 4096\nlora_r = 32\n'
+        "warmup_fraction = 0.1\nmerge_16bit = true\neval = false\n",
+        encoding="utf-8",
+    )
+    configs: list[TrainConfig] = []
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    monkeypatch.setattr(train, "run", configs.append)
+    train.main(["--config", str(p), "--lora-r", "8", "--no-merge-16bit"])
+    (cfg,) = configs
+    assert (cfg.model_name, cfg.max_seq_length, cfg.warmup_fraction) == ("Qwen/Qwen3.5-4B", 4096, 0.1)
+    assert (cfg.lora_r, cfg.merge_16bit, cfg.eval) == (8, False, False)  # The options override the profile
+    assert cfg.profile == str(p)
+    p.write_text("lora_rank = 32\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="lora_rank"):
+        train.main(["--config", str(p)])
+
+
+def test_a_profile_with_two_gpus_starts_torchrun(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    p = tmp_path / "two.toml"
+    p.write_text("num_gpus = 2\ngrad_accum = 8\n", encoding="utf-8")
+    started: list[tuple[int, list[str]]] = []
+
+    def fake_launch(num_gpus: int, module: str, args: list[str]) -> int:
+        started.append((num_gpus, list(args)))
+        return 0
+
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    monkeypatch.setattr(distributed, "launch", fake_launch)
+    with pytest.raises(SystemExit):
+        train.main(["--config", str(p)])
+    assert started == [(2, ["--config", str(p)])]  # Each GPU process reads the same profile
+
+
 def test_train_config_validates_the_metric_options() -> None:
     TrainConfig(best_metric="loss", eval_docs=0)
     with pytest.raises(ValueError, match="best_metric"):

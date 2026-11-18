@@ -1,0 +1,22 @@
+# One RTX 2060 (Max-Q) with 6 GB. The model is Qwen3.5-0.8B.
+#   uv run bioparser-train --config configs/rtx2060.toml
+#
+# Turing GPUs have no bf16 and no FlashAttention. Qwen3.5 trains in float32, and the attention uses
+# the memory-efficient kernel of PyTorch (infer.use_memory_efficient_attention).
+# Tested: 4 articles of approximately 20,000 tokens trained with a peak of 3.89 GiB GPU memory. With
+# 20,480 tokens, 40 of the 56 training articles of dataset v2 fit. 24,576 adds only 1 article.
+# The generation takes approximately 15 tokens each second, so the validation uses 2 articles.
+
+model_name = "Qwen/Qwen3.5-0.8B"
+model_revision = "2fc06364715b967f1860aea9cf38778875588b17"
+output_dir = "outputs/qwen3.5-0.8b-ets"
+max_seq_length = 20480
+num_gpus = 1
+grad_accum = 8
+tiled_mlp = true
+lora_r = 16
+lora_alpha = 16
+epochs = 3.0
+learning_rate = 2e-4
+eval_docs = 2
+eval_max_new_tokens = 4096

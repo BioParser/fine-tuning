@@ -1,0 +1,20 @@
+# Two RTX 3090 GPUs with 24 GB each. The model is Qwen3.5-4B.
+#   uv run bioparser-train --config configs/rtx3090x2.toml
+#
+# Ampere GPUs have bf16 and FlashAttention. Each GPU has a full copy of the model (data parallel).
+# Not tested yet. If the training stops with a memory error, use --max-seq-length 24576. If the
+# peak memory in the log is low, try --max-seq-length 49152.
+
+model_name = "Qwen/Qwen3.5-4B"
+model_revision = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+output_dir = "outputs/qwen3.5-4b-ets"
+max_seq_length = 32768
+num_gpus = 2
+grad_accum = 8  # Each GPU accumulates 4 steps. The effective batch is 8 examples.
+tiled_mlp = true
+lora_r = 16
+lora_alpha = 16
+epochs = 3.0
+learning_rate = 1e-4
+eval_docs = 4
+eval_max_new_tokens = 16384
