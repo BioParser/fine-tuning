@@ -23,17 +23,23 @@ ORCID = "0000-0001-9627-8821"
 FILLER = " The study reports measurements of skull and body size for many specimens." * 6
 
 
-def make_pdf(text: str, pad: int = 6000) -> bytes:
-    """Return a minimal PDF file with one page and a text layer that pypdf can read."""
-    content = f"BT /F1 11 Tf 50 700 Td ({text}) Tj ET".encode("latin-1")
+def make_pdf(text: str | list[str], pad: int = 6000) -> bytes:
+    """Return a minimal PDF file with a text layer that pypdf can read. A list gives one page for each text."""
+    texts = [text] if isinstance(text, str) else text
+    font = 3 + 2 * len(texts)  # Objects: catalog, pages, (page, content) for each page, font
+    kids = " ".join(f"{3 + 2 * i} 0 R" for i in range(len(texts)))
     objs = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
-        b"/Resources << /Font << /F1 5 0 R >> >> >>",
-        b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream",
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        f"<< /Type /Pages /Kids [{kids}] /Count {len(texts)} >>".encode(),
     ]
+    for i, page_text in enumerate(texts):
+        content = f"BT /F1 11 Tf 50 700 Td ({page_text}) Tj ET".encode("latin-1")
+        objs.append(
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {4 + 2 * i} 0 R "
+            f"/Resources << /Font << /F1 {font} 0 R >> >> >>".encode()
+        )
+        objs.append(b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream")
+    objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
     out = bytearray(b"%PDF-1.4\n%" + b"x" * pad + b"\n")
     offsets = []
     for i, obj in enumerate(objs, 1):

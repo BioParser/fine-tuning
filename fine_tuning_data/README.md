@@ -187,8 +187,9 @@ uv run bioparser-link-pdfs --apply
 ```
 
 The command compares the first pages and the name of each file with each paper: the DOI, the
-title, the first author and the year. It also examines the PDF files in `pdfs/` that do not have
-the name of a paper. It never replaces a file in `pdfs/`.
+title, the first author and the year. If two papers agree, the paper with its title on page 1
+wins, because the later pages can contain the titles of other articles. It also examines the PDF
+files in `pdfs/` that do not have the name of a paper. It never replaces a file in `pdfs/`.
 
 | Result | Description |
 |---|---|
