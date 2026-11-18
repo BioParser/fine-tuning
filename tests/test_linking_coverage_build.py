@@ -4,10 +4,18 @@ import json
 import zipfile
 from pathlib import Path
 
-from conftest import paper_a_markdown, paper_a_mineru_markdown, paper_a_rows
+from conftest import (
+    ets_row,
+    paper_a_markdown,
+    paper_a_mineru_markdown,
+    paper_a_rows,
+    paper_b_markdown,
+    paper_b_rows,
+    write_ets,
+)
 
 from bioparser_ft.build_dataset import assign_split, build
-from bioparser_ft.coverage import label_coverage, numbers_in
+from bioparser_ft.coverage import label_coverage, numbers_in, row_support
 from bioparser_ft.linking import MarkdownSource, discover_markdown, link, paper_key
 from bioparser_ft.markdown import clean_markdown
 from bioparser_ft.schema import ETS_COLUMNS, MODEL_HEADER, SYSTEM_PROMPT
@@ -113,6 +121,15 @@ def test_split_is_stable_and_grouped() -> None:
     assert 0.07 < splits.count("test") / 2000 < 0.13
 
 
+def test_cross_validation_folds() -> None:
+    """Each article is in the test split of exactly one fold."""
+    keys = [f"paper {i}" for i in range(500)]
+    splits = [[assign_split(k, 0.1, 0.0, "salt", folds=5, fold=f) for f in range(5)] for k in keys]
+    assert all(s.count("test") == 1 for s in splits)
+    in_fold_0 = [s[0] for s in splits]
+    assert 0.15 < in_fold_0.count("test") / 500 < 0.25 and 0.05 < in_fold_0.count("val") / 500 < 0.12
+
+
 def test_build_uses_default_manifest(ets_dir: Path, parsed_dir: Path, tmp_path: Path) -> None:
     """The fetch command writes manifest.tsv next to ets_tsv/. The builder uses it without --manifest."""
     (ets_dir.parent / "manifest.tsv").write_text(
@@ -137,6 +154,68 @@ def test_build_excludes_a_damaged_zip_and_continues(ets_dir: Path, parsed_dir: P
 
 
 def test_build_without_manifest_file(ets_dir: Path, parsed_dir: Path, tmp_path: Path) -> None:
+    """The "part 2" file has the citation of "Doe and Roe, 2020": it joins that article without a manifest."""
     report = build(ets_dir, parsed_dir, tmp_path / "processed", val_fraction=0.0, test_fraction=0.0)
     assert report["manifest"] is None
-    assert "ETS_Doe and Roe, 2020 part 2.tsv" in report["unmatched_tsv"]
+    assert report["unmatched_tsv"] == ["ETS_Nobody, 1999.tsv"]  # Smith and Mislinked have its citation
+    assert report["counts"]["joined_by_citation"] == 1
+    assert report["joined_by_citation"][0] == "ETS_Doe and Roe, 2020 part 2.tsv -> Doe and Roe, 2020.zip"
+    assert "Add a row to the manifest" in report["joined_by_citation"][1]
+    doe = next(e for e in report["examples"] if e["id"] == "doe and roe, 2020")
+    assert doe["n_rows"] == 3 and len(doe["source_tsvs"]) == 2
+
+
+def test_suggestions_need_the_same_author_and_year(tmp_path: Path) -> None:
+    tsv, parsed = tmp_path / "ets_tsv", tmp_path / "parsed"
+    tsv.mkdir()
+    parsed.mkdir()
+    for name in ("Chen et al., 2023", "Doe et al., 2021"):
+        write_ets(tsv / f"ETS_{name}.tsv", paper_b_rows())
+    for name in ("Benda et al., 2023", "Doe et al., 2022"):
+        (parsed / f"{name}.md").write_text("x", encoding="utf-8")
+    assert link(tsv, parsed).suggestions == {}  # Not "Chen" -> "Benda", not 2021 -> 2022
+
+
+def test_row_support() -> None:
+    text = numbers_in("FA 37.42 ± 0.83 mm (36.5–39.1), n = 12")
+    assert row_support({"verbatimTraitValue": "37.42", "dispersion": "0.83"}, text) == "all"
+    assert row_support({"verbatimTraitValue": "37.42", "dispersion": "0.91"}, text) == "some"
+    assert row_support({"measurementValue_min": "12.5", "measurementValue_max": "14.1"}, text) == "none"
+    assert row_support({"verbatimTraitValue": "brown", "individualCount": "12"}, text) == "unchecked"
+
+
+def test_build_aligns_the_labels_with_the_text(ets_dir: Path, parsed_dir: Path, tmp_path: Path) -> None:
+    """Duplicate rows and rows without a value in the text go. A parsed file with the same text is one article."""
+    rows = paper_b_rows()
+    absent = ets_row(**{**dict(zip(ETS_COLUMNS, rows[1], strict=True)), "verbatimTraitValue": "71.9"})
+    # A duplicate row and a row with a value that is not in the text
+    write_ets(ets_dir / "ETS_Smith, 2021.tsv", [*rows, rows[0], absent])
+    # The same PDF under another name, with another citation
+    (parsed_dir / "Smith copy, 2021.md").write_text(paper_b_markdown(), encoding="utf-8")
+    cells = [dict(zip(ETS_COLUMNS, r, strict=True)) for r in rows]
+    write_ets(
+        ets_dir / "ETS_Smith copy, 2021.tsv",
+        [ets_row(**{**c, "references": "Smith, A. Mice."}) for c in cells],
+    )
+
+    out = tmp_path / "processed"
+    report = build(ets_dir, parsed_dir, out, val_fraction=0.0, test_fraction=0.0)
+    smith = next(e for e in report["examples"] if e["id"] == "smith, 2021")
+    assert report["same_text"] == ["Smith copy, 2021.md has the same text as Smith, 2021.md"]
+    assert smith["source_tsvs"] == ["ETS_Smith, 2021.tsv", "ETS_Smith copy, 2021.tsv"]
+    assert any("2 citations for one article" in w for w in smith["warnings"])
+    assert (smith["duplicate_rows"], smith["unsupported_rows"], smith["n_rows"]) == (3, 1, 2)
+    train = [json.loads(line) for line in (out / "train.jsonl").read_text(encoding="utf-8").splitlines()]
+    target = parse_model_tsv(next(r for r in train if r["id"] == "smith, 2021")["messages"][-1]["content"])
+    assert {r["references"] for r in target.records} == {paper_b_rows()[0][0]}
+    assert "71.9" not in {r["verbatimTraitValue"] for r in target.records}
+
+    kept = build(
+        ets_dir,
+        parsed_dir,
+        tmp_path / "kept",
+        val_fraction=0.0,
+        test_fraction=0.0,
+        keep_unsupported_rows=True,
+    )
+    assert next(e for e in kept["examples"] if e["id"] == "smith, 2021")["n_rows"] == 3

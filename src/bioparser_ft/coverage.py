@@ -22,6 +22,9 @@ VALUE_COLUMNS = (
     "dispersion",
     "individualCount",
 )
+# The value columns of a row for coverage.row_support. individualCount is not in the list: a small
+# sample size such as "12" is in almost every article.
+SUPPORT_COLUMNS = ("verbatimTraitValue", "measurementValue_min", "measurementValue_max", "dispersion")
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
 MAX_NUMBER_CHARS = 30  # A longer digit run (an ID, a sequence or OCR noise) is not a label value
 _WORD = re.compile(r"[a-z]+")
@@ -82,6 +85,21 @@ class Coverage:
     @property
     def name_ratio(self) -> float | None:
         return self.names_found / self.names_total if self.names_total else None
+
+
+def row_support(record: Mapping[str, str], text_numbers: set[str]) -> str:
+    """Return "all", "some" or "none": the part of the values of the row that are in the text.
+
+    text_numbers is numbers_in(text). The result is "unchecked" for a row without a number that
+    the check can use, for example a text value or only small integers.
+    """
+    numbers: set[str] = set()
+    for column in SUPPORT_COLUMNS:
+        numbers |= numbers_in(record.get(column, ""))
+    if not numbers:
+        return "unchecked"
+    found = numbers & text_numbers
+    return "all" if found == numbers else "some" if found else "none"
 
 
 def label_coverage(markdown: str, records: Iterable[Mapping[str, str]], sample: int = 10) -> Coverage:

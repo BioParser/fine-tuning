@@ -222,6 +222,14 @@ API use this file.
   `author` with the value `BioParser`.
 - The model writes the citation, the column `references`, only on the first row. `to_ets_records` copies it
   to the other rows. If the API has a correct citation, give it with `references=`.
+- In the text columns, the model writes `"` when a cell has the same value as the cell above, for
+  example the species name or the locality. `parse_model_tsv` writes the value again. The numbers
+  are always in full. This makes the tables about 21% shorter, so more tables fit in the
+  generation budget.
+- `clean_markdown` removes the reference list and the back matter (acknowledgements, funding,
+  author contributions and similar sections) and joins the digits in formulas
+  (`$3 7 . 4$` → `$37.4$`). The input is about 26% shorter. Appendices and supplementary sections
+  stay, because they often have measurement tables.
 - `to_ets_records` also uses fixed rules. It finds an empty `taxonRank` from the name. It changes
   forms such as `males` to `Male`. It writes the full genus name for an abbreviation such as
   `H. sapiens`, if only one genus in the output starts with this letter.
